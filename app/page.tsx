@@ -1,6 +1,7 @@
 "use client";
 
 import { useRef, useState, useEffect, useCallback } from "react";
+import WatchMeCookModal from "./components/WatchMeCookModal";
 
 type AppState =
   | "loading"
@@ -63,6 +64,8 @@ export default function SousPage() {
 
   const [recipes, setRecipes] = useState<Recipe[]>([]);
   const [activeRecipe, setActiveRecipe] = useState<Recipe | null>(null);
+  const [pendingRecipe, setPendingRecipe] = useState<Recipe | null>(null);
+  const [showWatchModal, setShowWatchModal] = useState(false);
   const [cookingStep, setCookingStep] = useState(0);
   const [listeningForNext, setListeningForNext] = useState(false);
   const [speechSupported, setSpeechSupported] = useState(true);
@@ -523,6 +526,11 @@ export default function SousPage() {
     setActiveRecipe(recipe);
     setCookingStep(0);
     setAppState("cooking");
+  }, []);
+
+  const requestStartCooking = useCallback((recipe: Recipe) => {
+    setPendingRecipe(recipe);
+    setShowWatchModal(true);
   }, []);
 
   const stopCooking = useCallback(() => {
@@ -1114,11 +1122,28 @@ Search your knowledge of real recipes from cookbooks and food websites. Give me 
           <h2 style={styles.sectionTitle}>What you can cook</h2>
           <p style={styles.sectionSub}>Tap a recipe to start cooking with voice guidance.</p>
 
+          {showWatchModal && pendingRecipe && (
+            <WatchMeCookModal
+              recipeName={pendingRecipe.title}
+              stepCount={pendingRecipe.steps.length}
+              onConfirm={() => {
+                setShowWatchModal(false);
+                startCooking(pendingRecipe);
+                setPendingRecipe(null);
+              }}
+              onCancel={() => {
+                setShowWatchModal(false);
+                startCooking(pendingRecipe);
+                setPendingRecipe(null);
+              }}
+            />
+          )}
+
           {recipes.map((recipe, i) => (
             <button
               key={i}
               style={styles.recipeCard}
-              onClick={() => startCooking(recipe)}
+              onClick={() => requestStartCooking(recipe)}
             >
               <div style={styles.recipeCardHeader}>
                 <span style={styles.recipeTitle}>{recipe.title}</span>
