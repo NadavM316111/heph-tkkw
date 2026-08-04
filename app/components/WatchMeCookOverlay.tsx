@@ -8,6 +8,12 @@ interface WatchMeCookOverlayProps {
   stepInstruction?: string;
 }
 
+interface SubstituteCard {
+  ingredient: string;
+  suggestion: string;
+  ts: number;
+}
+
 export default function WatchMeCookOverlay({
   onStop,
   stepInstruction,
@@ -23,7 +29,11 @@ export default function WatchMeCookOverlay({
   const [commentaryLog, setCommentaryLog] = useState<{ text: string; ts: number; isError?: boolean }[]>([]);
   const [autoStopToast, setAutoStopToast] = useState(false);
   const [livePulse, setLivePulse] = useState(true);
+  const [substituteCard, setSubstituteCard] = useState<SubstituteCard | null>(null);
+  const [substituteLoading, setSubstituteLoading] = useState(false);
   const commentaryEndRef = useRef<HTMLDivElement>(null);
+  const recognitionRef = useRef<InstanceType<typeof (window as any).webkitSpeechRecognition> | null>(null);
+  const listeningRef = useRef(false);
 
   // Pulse the LIVE badge
   useEffect(() => {
@@ -69,6 +79,116 @@ export default function WatchMeCookOverlay({
   useEffect(() => {
     commentaryEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [commentaryLog]);
+
+  // ── Substitute via voice ──────────────────────────────────────────────
+  const triggerSubstitute = useCallback(async (ingredient: string) => {
+    if (!ingredient.trim()) return;
+    setSubstituteLoading(true);
+    addCommentary(`🔄 Looking for a substitute for "${ingredient}"…`);
+    try {
+      const res = await fetch("/api/substitute", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ingredient }),
+      });
+      if (!res.ok) throw new Error("Substitute lookup failed");
+      const data = await res.json();
+      // Accept either { suggestion } or { substitute } from the endpoint
+      const suggestion: string =
+        data.suggestion ?? data.substitute ?? data.text ?? "No substitute found.";
+      setSubstituteCard({ ingredient, suggestion, ts: Date.now() });
+      addCommentary(`💡 Substitute for ${ingredient}: ${suggestion}`);
+      // Stop recognition while speaking so it doesn't hear itself
+      if (recognitionRef.current && listeningRef.current) {
+        try { recognitionRef.current.stop(); } catch { /* ignore */ }
+        listeningRef.current = false;
+      }
+      window.speechSynthesis.cancel();
+      const utt = new SpeechSynthesisUtterance(
+        `For ${ingredient}, you can use: ${suggestion}`
+      );
+      utt.rate = 0.95;
+      utt.lang = "en-US";
+      utt.onend = () => {
+        // Resume listening after speaking
+        if (recognitionRef.current && !listeningRef.current) {
+          try { recognitionRef.current.start(); listeningRef.current = true; } catch { /* ignore */ }
+        }
+      };
+      window.speechSynthesis.speak(utt);
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : "Substitute lookup failed";
+      addCommentary(msg, true);
+    } finally {
+      setSubstituteLoading(false);
+    }
+  }, [addCommentary]);
+
+  // ── Voice command listener ────────────────────────────────────────────
+  useEffect(() => {
+    const SpeechRecognition =
+      (window as any).SpeechRecognition ??
+      (window as any).webkitSpeechRecognition;
+    if (!SpeechRecognition) return; // browser doesn't support it
+
+    const recognition = new SpeechRecognition();
+    recognition.continuous = true;
+    recognition.interimResults = false;
+    recognition.lang = "en-US";
+    recognitionRef.current = recognition;
+
+    recognition.onresult = (event: any) => {
+      const last = event.results[event.results.length - 1];
+      if (!last.isFinal) return;
+      const transcript: string = last[0].transcript.trim().toLowerCase();
+
+      // Match "substitute X", "I don't have X", "i dont have X", "replace X"
+      const patterns = [
+        /\bsubstitute\s+(?:for\s+)?(.+)/,
+        /\bi\s+don'?t\s+have\s+(.+)/,
+        /\breplace\s+(?:the\s+)?(.+)/,
+      ];
+      for (const pattern of patterns) {
+        const match = transcript.match(pattern);
+        if (match) {
+          // Clean trailing filler words
+          const ingredient = match[1]
+            .replace(/\b(please|with what|with something else|today|now)\b/g, "")
+            .trim();
+          if (ingredient) {
+            triggerSubstitute(ingredient);
+          }
+          break;
+        }
+      }
+    };
+
+    recognition.onerror = (event: any) => {
+      // "no-speech" is harmless — just restart
+      if (event.error === "no-speech" || event.error === "aborted") return;
+      listeningRef.current = false;
+    };
+
+    recognition.onend = () => {
+      listeningRef.current = false;
+      // Auto-restart unless we deliberately stopped (e.g. while speaking)
+      if (recognitionRef.current === recognition) {
+        try { recognition.start(); listeningRef.current = true; } catch { /* ignore */ }
+      }
+    };
+
+    try {
+      recognition.start();
+      listeningRef.current = true;
+    } catch { /* ignore */ }
+
+    return () => {
+      recognitionRef.current = null;
+      listeningRef.current = false;
+      try { recognition.stop(); } catch { /* ignore */ }
+    };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []); // start once on mount; triggerSubstitute is stable via useCallback
 
   const formatTime = (s: number) => {
     const m = Math.floor(s / 60).toString().padStart(2, "0");
@@ -255,9 +375,45 @@ export default function WatchMeCookOverlay({
 
       {/* ── Commentary panel ── */}
       <div style={S.panel}>
+
+        {/* Substitute card */}
+        {substituteCard && (
+          <div style={S.subCard}>
+            <div style={S.subCardTop}>
+              <span style={S.subCardBadge}>🔄 Swap</span>
+              <button
+                style={S.subCardDismiss}
+                onClick={() => setSubstituteCard(null)}
+                aria-label="Dismiss"
+              >
+                ✕
+              </button>
+            </div>
+            <div style={S.subCardBody}>
+              <span style={S.subCardIngredient}>
+                {substituteCard.ingredient}
+              </span>
+              <span style={S.subCardArrow}>→</span>
+              <span style={S.subCardSuggestion}>
+                {substituteCard.suggestion}
+              </span>
+            </div>
+            {substituteLoading && (
+              <span style={{ fontSize: 12, color: "#aaa", marginTop: 4 }}>
+                Updating…
+              </span>
+            )}
+          </div>
+        )}
+
         {/* Panel header */}
         <div style={S.panelHeader}>
-          <span style={S.panelTitle}>🤖 AI Commentary</span>
+          <span style={S.panelTitle}>
+            🤖 AI Commentary
+            {listeningRef.current && (
+              <span style={S.micBadge} title="Listening for voice commands">🎙</span>
+            )}
+          </span>
           <button
             style={{ ...S.checkBtn, opacity: checking || !cameraReady ? 0.5 : 1 }}
             onClick={() => checkPan()}
@@ -503,6 +659,69 @@ const S: Record<string, React.CSSProperties> = {
     borderTop: "2px solid #fff",
     borderRadius: "50%",
     animation: "spin 0.8s linear infinite",
+  },
+
+  // ── Substitute card ───────────────────────────────────────────────────
+  subCard: {
+    margin: "10px 12px 0",
+    background: "#1c1a14",
+    border: "1px solid rgba(255, 200, 60, 0.35)",
+    borderRadius: 14,
+    padding: "10px 14px",
+    flexShrink: 0,
+  },
+  subCardTop: {
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "space-between",
+    marginBottom: 6,
+  },
+  subCardBadge: {
+    fontSize: 12,
+    fontWeight: 700,
+    color: "#FFD95A",
+    letterSpacing: 0.5,
+    textTransform: "uppercase" as const,
+  },
+  subCardDismiss: {
+    background: "none",
+    border: "none",
+    color: "#666",
+    fontSize: 14,
+    cursor: "pointer",
+    padding: "0 2px",
+    lineHeight: 1,
+  },
+  subCardBody: {
+    display: "flex",
+    alignItems: "flex-start",
+    gap: 8,
+    flexWrap: "wrap" as const,
+  },
+  subCardIngredient: {
+    color: "#FF6B6B",
+    fontWeight: 700,
+    fontSize: 14,
+    textDecoration: "line-through",
+    opacity: 0.9,
+  },
+  subCardArrow: {
+    color: "#555",
+    fontSize: 16,
+    fontWeight: 700,
+    flexShrink: 0,
+  },
+  subCardSuggestion: {
+    color: "#e8e8e8",
+    fontSize: 14,
+    lineHeight: 1.45,
+    flex: 1,
+  },
+  micBadge: {
+    marginLeft: 6,
+    fontSize: 13,
+    opacity: 0.7,
+    verticalAlign: "middle",
   },
 
   // ── Toast ─────────────────────────────────────────────────────────────
