@@ -29,12 +29,34 @@ export default function RecipePage({ params }: { params: { id: string } }) {
   const [listening, setListening] = useState(false);
   const [cookMode, setCookMode] = useState(false);
   const [shared, setShared] = useState(false);
+  const [isOffline, setIsOffline] = useState(false);
+  const [servedFromCache, setServedFromCache] = useState(false);
   const recognitionRef = useRef<any>(null);
+
+  // Offline detection
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    setIsOffline(!navigator.onLine);
+    const goOnline  = () => setIsOffline(false);
+    const goOffline = () => setIsOffline(true);
+    window.addEventListener("online",  goOnline);
+    window.addEventListener("offline", goOffline);
+    return () => {
+      window.removeEventListener("online",  goOnline);
+      window.removeEventListener("offline", goOffline);
+    };
+  }, []);
 
   // Fetch recipe by UUID
   useEffect(() => {
-    fetch(`/api/recipes/${params.id}`)
-      .then((r) => r.json())
+    const controller = new AbortController();
+    fetch(`/api/recipes/${params.id}`, { signal: controller.signal })
+      .then(async (r) => {
+        // If the SW served this from cache the response still arrives here;
+        // we detect "we were offline when we got it" via navigator.onLine.
+        if (!navigator.onLine) setServedFromCache(true);
+        return r.json();
+      })
       .then((data) => {
         if (data.error) {
           setError(data.error);
@@ -43,10 +65,12 @@ export default function RecipePage({ params }: { params: { id: string } }) {
         }
         setLoading(false);
       })
-      .catch(() => {
+      .catch((err) => {
+        if (err.name === "AbortError") return;
         setError("Failed to load recipe.");
         setLoading(false);
       });
+    return () => controller.abort();
   }, [params.id]);
 
   const steps: RecipeStep[] = recipe?.steps ?? [];
@@ -162,8 +186,17 @@ export default function RecipePage({ params }: { params: { id: string } }) {
   const progress = cookMode ? ((currentStep + 1) / stepCount) * 100 : 0;
   const isLastStep = currentStep === stepCount - 1;
 
+  const showOfflineBanner = isOffline || servedFromCache;
+
   return (
     <div style={s.page}>
+
+      {/* Offline banner */}
+      {showOfflineBanner && (
+        <div style={s.offlineBanner}>
+          📴 Offline – using saved recipe
+        </div>
+      )}
 
       {/* ── Hero card (OG-image-ready layout) ── */}
       <div style={s.hero}>
@@ -739,6 +772,20 @@ const s: Record<string, React.CSSProperties> = {
     display: "flex",
     alignItems: "center",
     justifyContent: "center",
+  },
+
+  // ── Offline banner ────────────────────────────────────
+  offlineBanner: {
+    background: "#2a1a00",
+    color: "#fbbf24",
+    border: "1px solid #f59e0b44",
+    padding: "10px 20px",
+    fontSize: 13,
+    fontWeight: 700,
+    textAlign: "center" as const,
+    letterSpacing: 0.2,
+    width: "100%",
+    boxSizing: "border-box" as const,
   },
 
   // ── Footer ────────────────────────────────────────────

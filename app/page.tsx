@@ -692,11 +692,14 @@ export default function SousPage() {
   }, [adaptMultiplier, adaptDifficulty]);
 
   const startCooking = useCallback((recipe: Recipe) => {
+    const uuid = recipeUuids[recipe.title] ?? null;
     setActiveRecipe(recipe);
-    setActiveRecipeUuid(recipeUuids[recipe.title] ?? null);
+    setActiveRecipeUuid(uuid);
     setCookingStep(0);
+    // Pre-cache the recipe so it's available offline
+    if (uuid) precacheRecipe(uuid);
     setAppState("cooking");
-  }, [recipeUuids]);
+  }, [recipeUuids, precacheRecipe]);
 
   const requestStartCooking = useCallback((recipe: Recipe) => {
     setPendingRecipe(recipe);
@@ -743,6 +746,30 @@ export default function SousPage() {
       setOrderLoading(false);
     }
   }, [orderSheet, user]);
+
+  // ── Offline detection ──────────────────────────────────────────────────────
+  const [isOffline, setIsOffline] = useState(false);
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    setIsOffline(!navigator.onLine);
+    const goOnline  = () => setIsOffline(false);
+    const goOffline = () => setIsOffline(true);
+    window.addEventListener("online",  goOnline);
+    window.addEventListener("offline", goOffline);
+    return () => {
+      window.removeEventListener("online",  goOnline);
+      window.removeEventListener("offline", goOffline);
+    };
+  }, []);
+
+  // ── Pre-cache a recipe via the service worker ──────────────────────────────
+  const precacheRecipe = useCallback((uuid: string) => {
+    if (typeof window === "undefined" || !("serviceWorker" in navigator)) return;
+    const url = `/api/recipes/${uuid}`;
+    navigator.serviceWorker.ready.then((reg) => {
+      reg.active?.postMessage({ type: "PRECACHE_RECIPE", url });
+    }).catch(() => {});
+  }, []);
 
   const markCooked = useCallback(async (uuid: string) => {
     try {
@@ -1116,6 +1143,7 @@ Search your knowledge of real recipes from cookbooks and food websites. Give me 
                       setActiveRecipe(r);
                       setActiveRecipeUuid(r.uuid);
                       setCookingStep(0);
+                      precacheRecipe(r.uuid);
                       setAppState("cooking");
                     }}
                   >
@@ -1711,6 +1739,12 @@ Search your knowledge of real recipes from cookbooks and food websites. Give me 
 
     return (
       <div style={styles.cookingScreen}>
+        {/* Offline banner */}
+        {isOffline && (
+          <div style={styles.offlineBanner}>
+            📴 Offline – using saved recipe
+          </div>
+        )}
         {/* Top bar */}
         <div style={styles.cookingHeader}>
           <button style={styles.cookingBackBtn} onClick={stopCooking}>✕</button>
@@ -3310,6 +3344,20 @@ const styles: Record<string, React.CSSProperties> = {
     color: "#FF6B35",
     fontSize: 14,
     flexShrink: 0,
+  },
+
+  // Offline banner
+  offlineBanner: {
+    background: "#2a1a00",
+    color: "#fbbf24",
+    border: "1px solid #f59e0b44",
+    borderRadius: 0,
+    padding: "10px 20px",
+    fontSize: 13,
+    fontWeight: 700,
+    textAlign: "center" as const,
+    letterSpacing: 0.2,
+    zIndex: 50,
   },
 
   // Done
