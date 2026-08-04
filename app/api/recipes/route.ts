@@ -5,7 +5,7 @@ import { getSessionEmail } from "../../../lib/session";
 const CREATE_SQL =
   "CREATE TABLE IF NOT EXISTS " +
   P +
-  "_recipes (id SERIAL PRIMARY KEY, user_email TEXT NOT NULL, detection_id INTEGER NOT NULL DEFAULT 0, uuid TEXT NOT NULL UNIQUE, title TEXT NOT NULL, description TEXT, ingredients_used JSONB NOT NULL, extra_ingredients_needed JSONB, steps JSONB NOT NULL, total_time_minutes INTEGER, difficulty TEXT, cuisine TEXT, ai_model_version TEXT, created_at TIMESTAMPTZ DEFAULT now())";
+  "_recipes (id SERIAL PRIMARY KEY, user_email TEXT NOT NULL, detection_id INTEGER NOT NULL DEFAULT 0, uuid TEXT NOT NULL UNIQUE, title TEXT NOT NULL, description TEXT, ingredients_used JSONB NOT NULL, extra_ingredients_needed JSONB, steps JSONB NOT NULL, total_time_minutes INTEGER, difficulty TEXT, cuisine TEXT, ai_model_version TEXT, created_at TIMESTAMPTZ DEFAULT now(), last_cooked_at TIMESTAMPTZ)";
 
 export async function POST(req: NextRequest) {
   await ensureTable(CREATE_SQL);
@@ -54,4 +54,23 @@ export async function GET(req: NextRequest) {
     [email]
   );
   return NextResponse.json({ recipes: rows });
+}
+
+export async function PATCH(req: NextRequest) {
+  await ensureTable(CREATE_SQL);
+
+  const email = await getSessionEmail(req);
+  if (!email) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+
+  const { uuid } = await req.json();
+  if (!uuid) return NextResponse.json({ error: "Missing uuid" }, { status: 400 });
+
+  const rows = await q(
+    "UPDATE " + P + "_recipes SET last_cooked_at = now() WHERE uuid = $1 AND user_email = $2 RETURNING uuid",
+    [uuid, email]
+  );
+  if (!rows || (rows as any[]).length === 0) {
+    return NextResponse.json({ error: "Not found" }, { status: 404 });
+  }
+  return NextResponse.json({ ok: true });
 }

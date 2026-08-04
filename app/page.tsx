@@ -68,6 +68,9 @@ export default function SousPage() {
   const [pantryItems, setPantryItems] = useState<{ id: number; ingredient: string }[]>([]);
   const [pantryLoading, setPantryLoading] = useState(false);
 
+  const [recentRecipes, setRecentRecipes] = useState<(Recipe & { uuid: string; last_cooked_at: string | null })[]>([]);
+  const [recentLoading, setRecentLoading] = useState(false);
+
   const [recipes, setRecipes] = useState<Recipe[]>([]);
   const [recipeUuids, setRecipeUuids] = useState<Record<string, string>>({});
   const [activeRecipe, setActiveRecipe] = useState<Recipe | null>(null);
@@ -190,6 +193,25 @@ export default function SousPage() {
       window.history.replaceState({}, "", clean);
       setTimeout(() => setOrderToast(false), 5000);
     }
+  }, []);
+
+  const loadRecentRecipes = useCallback(async () => {
+    setRecentLoading(true);
+    try {
+      const res = await fetch("/api/recipes");
+      if (res.ok) {
+        const { recipes: rows } = await res.json();
+        // Parse JSONB fields that come back as strings from Postgres
+        const parsed = (rows || []).slice(0, 5).map((r: any) => ({
+          ...r,
+          ingredients_used: typeof r.ingredients_used === "string" ? JSON.parse(r.ingredients_used) : (r.ingredients_used ?? []),
+          extra_ingredients_needed: typeof r.extra_ingredients_needed === "string" ? JSON.parse(r.extra_ingredients_needed) : (r.extra_ingredients_needed ?? []),
+          steps: typeof r.steps === "string" ? JSON.parse(r.steps) : (r.steps ?? []),
+        }));
+        setRecentRecipes(parsed);
+      }
+    } catch {}
+    setRecentLoading(false);
   }, []);
 
   // Check session on mount, and load pantry if authenticated
@@ -684,6 +706,16 @@ export default function SousPage() {
     }
   }, [orderSheet, user]);
 
+  const markCooked = useCallback(async (uuid: string) => {
+    try {
+      await fetch("/api/recipes", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ uuid }),
+      });
+    } catch {}
+  }, []);
+
   const stopCooking = useCallback(() => {
     synthStopRef.current = true;
     window.speechSynthesis.cancel();
@@ -882,6 +914,28 @@ Search your knowledge of real recipes from cookbooks and food websites. Give me 
     setNewIngredient("");
   }, [newIngredient]);
 
+  // ── Load recent recipes when home screen mounts ────────────────────────
+  useEffect(() => {
+    if (appState === "home" && user) {
+      loadRecentRecipes();
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [appState, user]);
+
+  // ── Helper: format a UTC date string as a relative label ──────────────
+  const formatRelativeDate = (iso: string): string => {
+    const diff = Date.now() - new Date(iso).getTime();
+    const mins = Math.floor(diff / 60000);
+    if (mins < 2) return "just now";
+    if (mins < 60) return `${mins}m ago`;
+    const hours = Math.floor(mins / 60);
+    if (hours < 24) return `${hours}h ago`;
+    const days = Math.floor(hours / 24);
+    if (days === 1) return "yesterday";
+    if (days < 7) return `${days}d ago`;
+    return new Date(iso).toLocaleDateString(undefined, { month: "short", day: "numeric" });
+  };
+
   // ── RENDER ─────────────────────────────────────────────────────────────
 
   if (appState === "loading") {
@@ -990,6 +1044,61 @@ Search your knowledge of real recipes from cookbooks and food websites. Give me 
             style={{ display: "none" }}
             onChange={handleFileSelect}
           />
+
+          {/* Recent Recipes */}
+          <div style={styles.recentSection}>
+            <div style={styles.recentHeader}>
+              <span style={styles.recentTitle}>Recent Recipes</span>
+              <button
+                style={styles.recentRefreshBtn}
+                onClick={loadRecentRecipes}
+                disabled={recentLoading}
+                aria-label="Refresh recent recipes"
+              >
+                {recentLoading ? "…" : "↻"}
+              </button>
+            </div>
+
+            {recentLoading ? (
+              <div style={{ display: "flex", justifyContent: "center", padding: "16px 0" }}>
+                <div style={styles.spinner} />
+              </div>
+            ) : recentRecipes.length === 0 ? (
+              <p style={styles.recentEmpty}>
+                No recipes yet — take a photo to get started!
+              </p>
+            ) : (
+              <div style={styles.recentList}>
+                {recentRecipes.map((r) => (
+                  <button
+                    key={r.uuid}
+                    style={styles.recentCard}
+                    onClick={() => {
+                      // Jump straight into cooking without re-scanning
+                      setActiveRecipe(r);
+                      setActiveRecipeUuid(r.uuid);
+                      setCookingStep(0);
+                      setAppState("cooking");
+                    }}
+                  >
+                    <div style={styles.recentCardInner}>
+                      <div style={styles.recentCardLeft}>
+                        <span style={styles.recentCardTitle}>{r.title}</span>
+                        <span style={styles.recentCardMeta}>
+                          {r.total_time_minutes ? `⏱ ${r.total_time_minutes} min · ` : ""}
+                          {r.difficulty ?? ""}
+                          {r.last_cooked_at
+                            ? ` · cooked ${formatRelativeDate(r.last_cooked_at)}`
+                            : ""}
+                        </span>
+                      </div>
+                      <span style={styles.recentCardArrow}>▶</span>
+                    </div>
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
         </div>
 
         <p style={styles.footerNote}>Signed in as {user?.email}</p>
@@ -1656,6 +1765,7 @@ Search your knowledge of real recipes from cookbooks and food websites. Give me 
                   recognitionRef.current = null;
                 }
                 setListeningForNext(false);
+                if (activeRecipeUuid) markCooked(activeRecipeUuid);
                 setAppState("done");
               }}
             >
@@ -2703,6 +2813,88 @@ const styles: Record<string, React.CSSProperties> = {
     margin: 0,
     textAlign: "center" as const,
     animation: "pulse 1.2s ease-in-out infinite",
+  },
+
+  // Recent recipes section on home
+  recentSection: {
+    width: "100%",
+    marginTop: 8,
+    display: "flex",
+    flexDirection: "column" as const,
+    gap: 10,
+  },
+  recentHeader: {
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "space-between",
+  },
+  recentTitle: {
+    color: "#fff",
+    fontWeight: 700,
+    fontSize: 16,
+  },
+  recentRefreshBtn: {
+    background: "transparent",
+    border: "none",
+    color: "#666",
+    fontSize: 20,
+    cursor: "pointer",
+    lineHeight: 1,
+    padding: "4px 8px",
+  },
+  recentEmpty: {
+    color: "#555",
+    fontSize: 13,
+    textAlign: "center" as const,
+    padding: "12px 0",
+    margin: 0,
+  },
+  recentList: {
+    display: "flex",
+    flexDirection: "column" as const,
+    gap: 8,
+  },
+  recentCard: {
+    background: "#1a1a1a",
+    border: "1px solid #2a2a2a",
+    borderRadius: 14,
+    padding: "14px 16px",
+    cursor: "pointer",
+    width: "100%",
+    textAlign: "left" as const,
+    transition: "border-color 0.15s",
+  },
+  recentCardInner: {
+    display: "flex",
+    alignItems: "center",
+    gap: 12,
+  },
+  recentCardLeft: {
+    flex: 1,
+    display: "flex",
+    flexDirection: "column" as const,
+    gap: 4,
+    minWidth: 0,
+  },
+  recentCardTitle: {
+    color: "#fff",
+    fontSize: 15,
+    fontWeight: 700,
+    overflow: "hidden",
+    textOverflow: "ellipsis",
+    whiteSpace: "nowrap" as const,
+  },
+  recentCardMeta: {
+    color: "#666",
+    fontSize: 12,
+    overflow: "hidden",
+    textOverflow: "ellipsis",
+    whiteSpace: "nowrap" as const,
+  },
+  recentCardArrow: {
+    color: "#FF6B35",
+    fontSize: 14,
+    flexShrink: 0,
   },
 
   // Done
