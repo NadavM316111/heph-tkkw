@@ -1,6 +1,34 @@
 import type { Recipe } from "../types/cooking";
 
 /**
+ * Speaks the given text using window.speechSynthesis and resolves only after
+ * the utterance has finished. Cancels any speech already in progress so calls
+ * never overlap.
+ */
+export function speakText(text: string): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (typeof window === "undefined" || !("speechSynthesis" in window)) {
+      resolve();
+      return;
+    }
+
+    // Cancel anything already playing so we never overlap.
+    window.speechSynthesis.cancel();
+
+    const utt = new SpeechSynthesisUtterance(text);
+    utt.rate = 0.95;
+    utt.pitch = 1;
+    utt.lang = "en-US";
+
+    utt.onend = () => resolve();
+    utt.onerror = (e) => reject(new Error(e.error));
+
+    window.speechSynthesis.speak(utt);
+  });
+}
+
+
+/**
  * Builds an AI vision prompt for the "watch me cook" pan-checking feature.
  * @param recipe  The recipe being cooked.
  * @param stepIndex  Zero-based index of the current step.
