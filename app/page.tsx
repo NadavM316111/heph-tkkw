@@ -1168,31 +1168,61 @@ Search your knowledge of real recipes from cookbooks and food websites. Give me 
             />
           )}
 
-          {recipes.map((recipe, i) => (
-            <button
-              key={i}
-              style={styles.recipeCard}
-              onClick={() => requestStartCooking(recipe)}
-            >
-              <div style={styles.recipeCardHeader}>
-                <span style={styles.recipeTitle}>{recipe.title}</span>
-                <span style={styles.recipeBadge}>{recipe.difficulty}</span>
-              </div>
-              <p style={styles.recipeDesc}>{recipe.description}</p>
-              {recipe.source_inspiration && (
-                <p style={styles.recipeSource}>🔗 {recipe.source_inspiration}</p>
-              )}
-              <div style={styles.recipeMeta}>
-                <span>⏱ {recipe.total_time_minutes} min</span>
-                <span>📋 {recipe.steps.length} steps</span>
-                {(recipe.extra_ingredients_needed?.length ?? 0) > 0 && (
-                  <span style={{ color: "#FF6B6B" }}>
-                    +{recipe.extra_ingredients_needed.length} extra needed
-                  </span>
-                )}
-              </div>
-            </button>
-          ))}
+          {recipes
+            .slice()
+            .sort((a, b) =>
+              (a.extra_ingredients_needed?.length ?? 0) -
+              (b.extra_ingredients_needed?.length ?? 0)
+            )
+            .map((recipe, i) => {
+              const missing = recipe.extra_ingredients_needed ?? [];
+              const canCookNow = missing.length === 0;
+              const almostThere = missing.length > 0 && missing.length <= 2;
+              return (
+                <button
+                  key={i}
+                  style={{
+                    ...styles.recipeCard,
+                    ...(canCookNow ? styles.recipeCardReady : {}),
+                    ...(almostThere ? styles.recipeCardAlmost : {}),
+                  }}
+                  onClick={() => requestStartCooking(recipe)}
+                >
+                  <div style={styles.recipeCardHeader}>
+                    <span style={styles.recipeTitle}>{recipe.title}</span>
+                    <span style={styles.recipeBadge}>{recipe.difficulty}</span>
+                  </div>
+
+                  {/* Ready / Almost badge */}
+                  {canCookNow ? (
+                    <div style={styles.readyBadge}>✅ Ready to cook</div>
+                  ) : (
+                    <div style={styles.almostBadge}>
+                      🟡 Need {missing.length} item{missing.length !== 1 ? "s" : ""}
+                    </div>
+                  )}
+
+                  <p style={styles.recipeDesc}>{recipe.description}</p>
+
+                  {/* Missing ingredient tags */}
+                  {missing.length > 0 && (
+                    <div style={styles.missingRow}>
+                      {missing.map((ing, j) => (
+                        <span key={j} style={styles.missingTag}>{ing}</span>
+                      ))}
+                    </div>
+                  )}
+
+                  {recipe.source_inspiration && (
+                    <p style={styles.recipeSource}>🔗 {recipe.source_inspiration}</p>
+                  )}
+                  <div style={styles.recipeMeta}>
+                    <span>⏱ {recipe.total_time_minutes} min</span>
+                    <span>📋 {recipe.steps.length} steps</span>
+                  </div>
+                </button>
+              );
+            })}
 
           <button style={{ ...styles.ghostBtn, marginTop: 8 }} onClick={resetToHome}>
             📷 Start over
@@ -1807,6 +1837,53 @@ const styles: Record<string, React.CSSProperties> = {
     fontSize: 14,
     margin: 0,
     lineHeight: 1.5,
+  },
+  recipeCardReady: {
+    borderColor: "#22c55e33",
+    background: "#0f1a0f",
+  },
+  recipeCardAlmost: {
+    borderColor: "#f59e0b33",
+    background: "#1a160a",
+  },
+  readyBadge: {
+    display: "inline-flex",
+    alignSelf: "flex-start",
+    background: "#14532d",
+    color: "#86efac",
+    fontSize: 12,
+    fontWeight: 700,
+    borderRadius: 20,
+    padding: "4px 12px",
+    border: "1px solid #22c55e44",
+    letterSpacing: 0.2,
+  },
+  almostBadge: {
+    display: "inline-flex",
+    alignSelf: "flex-start",
+    background: "#451a03",
+    color: "#fcd34d",
+    fontSize: 12,
+    fontWeight: 700,
+    borderRadius: 20,
+    padding: "4px 12px",
+    border: "1px solid #f59e0b44",
+    letterSpacing: 0.2,
+  },
+  missingRow: {
+    display: "flex",
+    flexWrap: "wrap" as const,
+    gap: 6,
+    marginTop: 2,
+  },
+  missingTag: {
+    background: "#292010",
+    color: "#fbbf24",
+    border: "1px solid #f59e0b55",
+    borderRadius: 20,
+    padding: "3px 10px",
+    fontSize: 12,
+    fontWeight: 600,
   },
   recipeSource: {
     color: "#FF6B35",
