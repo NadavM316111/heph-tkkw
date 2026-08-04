@@ -906,14 +906,14 @@ Steps should be clear, concise, kitchen-friendly instructions. Aim for 5-10 step
           {listeningForNext && (
             <div style={styles.listeningBadge}>
               <span style={styles.listeningDot} />
-              Listening… say <strong>"next"</strong>
+              Listening… say <strong>&ldquo;next&rdquo;</strong>
             </div>
           )}
 
           {!listeningForNext && (
             <p style={styles.speechHint}>
               {speechSupported
-                ? "Say "next" to advance, or tap the button below"
+                ? `Say "next" to advance, or tap the button below`
                 : "Tap the button below to advance"}
             </p>
           )}
