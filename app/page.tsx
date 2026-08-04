@@ -691,6 +691,30 @@ export default function SousPage() {
     }
   }, [adaptMultiplier, adaptDifficulty]);
 
+  // ── Offline detection ──────────────────────────────────────────────────────
+  const [isOffline, setIsOffline] = useState(false);
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    setIsOffline(!navigator.onLine);
+    const goOnline  = () => setIsOffline(false);
+    const goOffline = () => setIsOffline(true);
+    window.addEventListener("online",  goOnline);
+    window.addEventListener("offline", goOffline);
+    return () => {
+      window.removeEventListener("online",  goOnline);
+      window.removeEventListener("offline", goOffline);
+    };
+  }, []);
+
+  // ── Pre-cache a recipe via the service worker ──────────────────────────────
+  const precacheRecipe = useCallback((uuid: string) => {
+    if (typeof window === "undefined" || !("serviceWorker" in navigator)) return;
+    const url = `/api/recipes/${uuid}`;
+    navigator.serviceWorker.ready.then((reg) => {
+      reg.active?.postMessage({ type: "PRECACHE_RECIPE", url });
+    }).catch(() => {});
+  }, []);
+
   const startCooking = useCallback((recipe: Recipe) => {
     const uuid = recipeUuids[recipe.title] ?? null;
     setActiveRecipe(recipe);
@@ -746,30 +770,6 @@ export default function SousPage() {
       setOrderLoading(false);
     }
   }, [orderSheet, user]);
-
-  // ── Offline detection ──────────────────────────────────────────────────────
-  const [isOffline, setIsOffline] = useState(false);
-  useEffect(() => {
-    if (typeof window === "undefined") return;
-    setIsOffline(!navigator.onLine);
-    const goOnline  = () => setIsOffline(false);
-    const goOffline = () => setIsOffline(true);
-    window.addEventListener("online",  goOnline);
-    window.addEventListener("offline", goOffline);
-    return () => {
-      window.removeEventListener("online",  goOnline);
-      window.removeEventListener("offline", goOffline);
-    };
-  }, []);
-
-  // ── Pre-cache a recipe via the service worker ──────────────────────────────
-  const precacheRecipe = useCallback((uuid: string) => {
-    if (typeof window === "undefined" || !("serviceWorker" in navigator)) return;
-    const url = `/api/recipes/${uuid}`;
-    navigator.serviceWorker.ready.then((reg) => {
-      reg.active?.postMessage({ type: "PRECACHE_RECIPE", url });
-    }).catch(() => {});
-  }, []);
 
   const markCooked = useCallback(async (uuid: string) => {
     try {
