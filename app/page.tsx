@@ -51,9 +51,15 @@ export default function SousPage() {
   const [cameraError, setCameraError] = useState("");
   const [uploadedUrl, setUploadedUrl] = useState<string | null>(null);
   const [ingredients, setIngredients] = useState<string[]>([]);
+  const [pantryIngredients, setPantryIngredients] = useState<string[]>([]);
   const [newIngredient, setNewIngredient] = useState("");
   const [editingIndex, setEditingIndex] = useState<number | null>(null);
   const [editingValue, setEditingValue] = useState("");
+
+  // Pantry drawer
+  const [pantryDrawerOpen, setPantryDrawerOpen] = useState(false);
+  const [pantryItems, setPantryItems] = useState<{ id: number; ingredient: string }[]>([]);
+  const [pantryLoading, setPantryLoading] = useState(false);
 
   const [recipes, setRecipes] = useState<Recipe[]>([]);
   const [activeRecipe, setActiveRecipe] = useState<Recipe | null>(null);
@@ -139,13 +145,23 @@ export default function SousPage() {
     }
   }, []);
 
-  // Check session on mount
+  // Check session on mount, and load pantry if authenticated
   useEffect(() => {
     fetch("/api/auth")
       .then((r) => r.json())
-      .then((data) => {
+      .then(async (data) => {
         if (data.email) {
           setUser({ email: data.email });
+          // Pre-load pantry ingredients
+          try {
+            const pr = await fetch("/api/pantry");
+            if (pr.ok) {
+              const { items } = await pr.json();
+              const names: string[] = (items || []).map((it: { id: number; ingredient: string }) => it.ingredient);
+              setPantryIngredients(names);
+              setPantryItems(items || []);
+            }
+          } catch {}
           setAppState("home");
         } else {
           setAppState("unauthenticated");
@@ -360,7 +376,14 @@ export default function SousPage() {
         );
       }
 
-      setIngredients(detected.filter((i) => typeof i === "string" && i.trim()));
+      // Merge detected with pantry: pantry items come first, deduped
+      const detectedClean = detected.filter((i) => typeof i === "string" && i.trim());
+      const pantrySet = new Set(pantryIngredients.map((p) => p.toLowerCase()));
+      const merged = [
+        ...pantryIngredients,
+        ...detectedClean.filter((d) => !pantrySet.has(d.toLowerCase())),
+      ];
+      setIngredients(merged.length > 0 ? merged : detectedClean);
       setAppState("ingredients");
     } catch (err: unknown) {
       alert(err instanceof Error ? err.message : "Something went wrong. Please try again.");
@@ -515,9 +538,29 @@ export default function SousPage() {
     setAppState("recipes");
   }, []);
 
+  const savePantry = useCallback(async (items: string[]) => {
+    try {
+      await fetch("/api/pantry", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ingredients: items }),
+      });
+      // Refresh local pantry state
+      const pr = await fetch("/api/pantry");
+      if (pr.ok) {
+        const { items: saved } = await pr.json();
+        const names: string[] = (saved || []).map((it: { id: number; ingredient: string }) => it.ingredient);
+        setPantryIngredients(names);
+        setPantryItems(saved || []);
+      }
+    } catch {}
+  }, []);
+
   const findRecipes = useCallback(async () => {
     if (ingredients.length === 0) return;
     setRecipeError("");
+    // Auto-save confirmed ingredients to pantry before searching
+    savePantry(ingredients);
     setAppState("finding_recipes");
     try {
       const res = await fetch("/api/ai", {
@@ -569,6 +612,36 @@ Search your knowledge of real recipes from cookbooks and food websites. Give me 
       setAppState("ingredients");
     }
   }, [ingredients]);
+
+  const loadPantryDrawer = useCallback(async () => {
+    setPantryLoading(true);
+    try {
+      const pr = await fetch("/api/pantry");
+      if (pr.ok) {
+        const { items } = await pr.json();
+        setPantryItems(items || []);
+        const names: string[] = (items || []).map((it: { id: number; ingredient: string }) => it.ingredient);
+        setPantryIngredients(names);
+      }
+    } catch {}
+    setPantryLoading(false);
+  }, []);
+
+  const removePantryItem = useCallback(async (id: number) => {
+    try {
+      await fetch("/api/pantry", {
+        method: "DELETE",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ id }),
+      });
+      setPantryItems((prev) => prev.filter((it) => it.id !== id));
+      setPantryIngredients((prev) => {
+        const removed = pantryItems.find((it) => it.id === id);
+        if (!removed) return prev;
+        return prev.filter((p) => p !== removed.ingredient);
+      });
+    } catch {}
+  }, [pantryItems]);
 
   const resetToHome = useCallback(() => {
     if (capturedImage) URL.revokeObjectURL(capturedImage);
@@ -714,6 +787,15 @@ Search your knowledge of real recipes from cookbooks and food websites. Give me 
             >
               🖼️ Choose from library
             </button>
+            <button
+              style={styles.pantryBtn}
+              onClick={() => { setPantryDrawerOpen(true); loadPantryDrawer(); }}
+            >
+              🥫 Manage pantry
+              {pantryIngredients.length > 0 && (
+                <span style={styles.pantryCount}>{pantryIngredients.length}</span>
+              )}
+            </button>
           </div>
 
           <input
@@ -726,6 +808,54 @@ Search your knowledge of real recipes from cookbooks and food websites. Give me 
         </div>
 
         <p style={styles.footerNote}>Signed in as {user?.email}</p>
+
+        {/* Pantry drawer backdrop */}
+        {pantryDrawerOpen && (
+          <div
+            style={styles.drawerBackdrop}
+            onClick={() => setPantryDrawerOpen(false)}
+          />
+        )}
+
+        {/* Pantry drawer */}
+        <div style={{
+          ...styles.drawer,
+          transform: pantryDrawerOpen ? "translateY(0)" : "translateY(100%)",
+        }}>
+          <div style={styles.drawerHandle} />
+          <div style={styles.drawerHeader}>
+            <h3 style={styles.drawerTitle}>🥫 Your Pantry</h3>
+            <button style={styles.drawerClose} onClick={() => setPantryDrawerOpen(false)}>✕</button>
+          </div>
+          <p style={styles.drawerSub}>
+            These ingredients are pre-loaded whenever you start a new session.
+          </p>
+
+          {pantryLoading ? (
+            <div style={{ display: "flex", justifyContent: "center", padding: 24 }}>
+              <div style={styles.spinner} />
+            </div>
+          ) : pantryItems.length === 0 ? (
+            <p style={styles.drawerEmpty}>
+              No pantry items yet. Confirm an ingredients list to save them here.
+            </p>
+          ) : (
+            <ul style={styles.pantryList}>
+              {pantryItems.map((item) => (
+                <li key={item.id} style={styles.pantryListItem}>
+                  <span style={styles.pantryItemLabel}>{item.ingredient}</span>
+                  <button
+                    style={styles.pantryRemoveBtn}
+                    onClick={() => removePantryItem(item.id)}
+                    aria-label={`Remove ${item.ingredient}`}
+                  >
+                    ✕
+                  </button>
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
       </div>
     );
   }
@@ -871,9 +1001,22 @@ Search your knowledge of real recipes from cookbooks and food websites. Give me 
             Tap any item to edit it, or swipe the ✕ to remove. Add anything the AI missed below.
           </p>
 
+          {pantryIngredients.length > 0 && (
+            <div style={styles.pantryBadgeRow}>
+              <span style={styles.pantryBadge}>🥫 From your pantry</span>
+              <span style={styles.pantryBadgeSub}>
+                {pantryIngredients.filter((p) => ingredients.map(i => i.toLowerCase()).includes(p.toLowerCase())).length} item{pantryIngredients.filter((p) => ingredients.map(i => i.toLowerCase()).includes(p.toLowerCase())).length !== 1 ? "s" : ""} pre-loaded
+              </span>
+            </div>
+          )}
+
           <ul style={styles.ingredientList}>
             {ingredients.map((item, i) => (
-              <li key={i} style={styles.ingredientItem}>
+              <li key={i} style={{
+                ...styles.ingredientItem,
+                ...(pantryIngredients.some((p) => p.toLowerCase() === item.toLowerCase())
+                  ? styles.ingredientItemPantry : {}),
+              }}>
                 {editingIndex === i ? (
                   <input
                     style={styles.inlineInput}
@@ -895,6 +1038,9 @@ Search your knowledge of real recipes from cookbooks and food websites. Give me 
                     onClick={() => startEditing(i, item)}
                   >
                     {item}
+                    {pantryIngredients.some((p) => p.toLowerCase() === item.toLowerCase()) && (
+                      <span style={styles.pantryPip}>🥫</span>
+                    )}
                   </span>
                 )}
                 <button
@@ -1771,6 +1917,165 @@ const styles: Record<string, React.CSSProperties> = {
     fontWeight: 600,
     cursor: "pointer",
     whiteSpace: "nowrap" as const,
+  },
+
+  // Pantry button on home
+  pantryBtn: {
+    background: "#1a2a1a",
+    color: "#86efac",
+    border: "1px solid #22c55e44",
+    borderRadius: 16,
+    padding: "14px 24px",
+    fontSize: 15,
+    fontWeight: 600,
+    cursor: "pointer",
+    width: "100%",
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 8,
+    transition: "opacity 0.2s",
+  },
+  pantryCount: {
+    background: "#22c55e",
+    color: "#fff",
+    borderRadius: 20,
+    padding: "2px 8px",
+    fontSize: 12,
+    fontWeight: 800,
+  },
+
+  // Pantry drawer
+  drawerBackdrop: {
+    position: "fixed" as const,
+    inset: 0,
+    background: "rgba(0,0,0,0.6)",
+    zIndex: 200,
+  },
+  drawer: {
+    position: "fixed" as const,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    maxHeight: "75dvh",
+    background: "#161616",
+    borderRadius: "24px 24px 0 0",
+    zIndex: 201,
+    padding: "12px 20px 48px",
+    overflowY: "auto" as const,
+    transition: "transform 0.35s cubic-bezier(0.32,0.72,0,1)",
+    display: "flex",
+    flexDirection: "column" as const,
+    gap: 4,
+    boxShadow: "0 -4px 40px rgba(0,0,0,0.6)",
+  },
+  drawerHandle: {
+    width: 40,
+    height: 4,
+    background: "#333",
+    borderRadius: 2,
+    alignSelf: "center" as const,
+    marginBottom: 8,
+    flexShrink: 0,
+  },
+  drawerHeader: {
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "space-between",
+    flexShrink: 0,
+  },
+  drawerTitle: {
+    color: "#fff",
+    fontSize: 20,
+    fontWeight: 800,
+    margin: 0,
+  },
+  drawerClose: {
+    background: "#222",
+    color: "#888",
+    border: "none",
+    borderRadius: "50%",
+    width: 36,
+    height: 36,
+    fontSize: 16,
+    cursor: "pointer",
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  drawerSub: {
+    color: "#666",
+    fontSize: 13,
+    margin: "4px 0 8px",
+    lineHeight: 1.5,
+    flexShrink: 0,
+  },
+  drawerEmpty: {
+    color: "#555",
+    fontSize: 14,
+    textAlign: "center" as const,
+    padding: "24px 0",
+  },
+  pantryList: {
+    listStyle: "none",
+    margin: 0,
+    padding: 0,
+    display: "flex",
+    flexDirection: "column" as const,
+    gap: 8,
+  },
+  pantryListItem: {
+    display: "flex",
+    alignItems: "center",
+    background: "#1e1e1e",
+    borderRadius: 12,
+    padding: "10px 14px",
+    gap: 8,
+  },
+  pantryItemLabel: {
+    flex: 1,
+    color: "#ccc",
+    fontSize: 15,
+    textTransform: "capitalize" as const,
+  },
+  pantryRemoveBtn: {
+    background: "transparent",
+    border: "none",
+    color: "#555",
+    fontSize: 16,
+    cursor: "pointer",
+    padding: "4px 6px",
+    lineHeight: 1,
+    flexShrink: 0,
+  },
+
+  // Pantry badge on ingredients screen
+  pantryBadgeRow: {
+    display: "flex",
+    alignItems: "center",
+    gap: 8,
+    background: "#0f1f0f",
+    border: "1px solid #22c55e33",
+    borderRadius: 12,
+    padding: "8px 14px",
+  },
+  pantryBadge: {
+    color: "#86efac",
+    fontSize: 13,
+    fontWeight: 700,
+  },
+  pantryBadgeSub: {
+    color: "#4ade80",
+    fontSize: 12,
+    opacity: 0.7,
+  },
+  ingredientItemPantry: {
+    borderLeft: "3px solid #22c55e55",
+  },
+  pantryPip: {
+    fontSize: 11,
+    marginLeft: 6,
+    opacity: 0.7,
   },
 
   // Done
