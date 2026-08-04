@@ -1,9 +1,6 @@
 "use client";
 
 import { useState, useEffect, useRef, useCallback } from "react";
-import { useWatchMeCook } from "../../../hooks/useWatchMeCook";
-import WatchMeCookModal from "../../components/WatchMeCookModal";
-import WatchMeCookOverlay from "../../components/WatchMeCookOverlay";
 
 interface RecipeStep {
   step_number: number;
@@ -12,6 +9,7 @@ interface RecipeStep {
 
 interface Recipe {
   id: number;
+  uuid: string;
   title: string;
   description: string;
   ingredients_used: string[];
@@ -29,14 +27,11 @@ export default function RecipePage({ params }: { params: { id: string } }) {
   const [currentStep, setCurrentStep] = useState(0);
   const [speaking, setSpeaking] = useState(false);
   const [listening, setListening] = useState(false);
-  const [showWatchModal, setShowWatchModal] = useState(false);
-  const [watchActive, setWatchActive] = useState(false);
+  const [cookMode, setCookMode] = useState(false);
+  const [shared, setShared] = useState(false);
   const recognitionRef = useRef<any>(null);
 
-  const { session, videoRef, startSession, stopSession, setWatchStep } =
-    useWatchMeCook();
-
-  // Fetch recipe
+  // Fetch recipe by UUID
   useEffect(() => {
     fetch(`/api/recipes/${params.id}`)
       .then((r) => r.json())
@@ -58,32 +53,17 @@ export default function RecipePage({ params }: { params: { id: string } }) {
   const stepCount = steps.length;
   const currentInstruction = steps[currentStep]?.instruction ?? "";
 
-  // Speak a step aloud
-  const speakStep = useCallback(
-    (instruction: string) => {
-      if (!("speechSynthesis" in window)) return;
-      window.speechSynthesis.cancel();
-      setSpeaking(true);
-      const utt = new SpeechSynthesisUtterance(instruction);
-      utt.rate = 0.95;
-      utt.lang = "en-US";
-      utt.onend = () => setSpeaking(false);
-      utt.onerror = () => setSpeaking(false);
-      window.speechSynthesis.speak(utt);
-    },
-    []
-  );
-
-  // Speak current step when it changes (after first render)
-  const didMount = useRef(false);
-  useEffect(() => {
-    if (!didMount.current) {
-      didMount.current = true;
-      return;
-    }
-    if (currentInstruction) speakStep(currentInstruction);
-    if (watchActive) setWatchStep(currentStep);
-  }, [currentStep]); // eslint-disable-line react-hooks/exhaustive-deps
+  const speakStep = useCallback((instruction: string, prefix = "") => {
+    if (!("speechSynthesis" in window)) return;
+    window.speechSynthesis.cancel();
+    setSpeaking(true);
+    const utt = new SpeechSynthesisUtterance(prefix + instruction);
+    utt.rate = 0.95;
+    utt.lang = "en-US";
+    utt.onend = () => setSpeaking(false);
+    utt.onerror = () => setSpeaking(false);
+    window.speechSynthesis.speak(utt);
+  }, []);
 
   const goNext = useCallback(() => {
     setCurrentStep((s) => Math.min(s + 1, stepCount - 1));
@@ -93,70 +73,78 @@ export default function RecipePage({ params }: { params: { id: string } }) {
     setCurrentStep((s) => Math.max(s - 1, 0));
   }, []);
 
-  // Voice recognition for "next" command
-  const startListening = useCallback(() => {
-    const SpeechRecognition =
-      (window as any).SpeechRecognition ||
-      (window as any).webkitSpeechRecognition;
-    if (!SpeechRecognition) return;
-
-    if (recognitionRef.current) {
-      try {
-        recognitionRef.current.stop();
-      } catch {}
+  // Auto-read aloud when cook mode is on and step changes
+  const didMount = useRef(false);
+  useEffect(() => {
+    if (!didMount.current) { didMount.current = true; return; }
+    if (cookMode && currentInstruction) {
+      const step = steps[currentStep];
+      const prefix = currentStep === stepCount - 1
+        ? "Final step. "
+        : `Step ${step.step_number} of ${stepCount}. `;
+      speakStep(currentInstruction, prefix);
     }
+  }, [currentStep]); // eslint-disable-line react-hooks/exhaustive-deps
 
-    const recognition = new SpeechRecognition();
+  const startListening = useCallback(() => {
+    const SR =
+      (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
+    if (!SR) return;
+    if (recognitionRef.current) { try { recognitionRef.current.stop(); } catch {} }
+    const recognition = new SR();
     recognitionRef.current = recognition;
     recognition.continuous = false;
     recognition.lang = "en-US";
     recognition.interimResults = false;
-
     setListening(true);
     recognition.onresult = (e: any) => {
-      const transcript = e.results[0][0].transcript.toLowerCase().trim();
-      if (transcript.includes("next")) {
-        goNext();
-      }
+      const t = e.results[0][0].transcript.toLowerCase().trim();
+      if (t.includes("next")) goNext();
+      else if (t.includes("back") || t.includes("previous")) goPrev();
       setListening(false);
     };
     recognition.onerror = () => setListening(false);
     recognition.onend = () => setListening(false);
-
-    // Stop speech synthesis before listening so it doesn't hear itself
     window.speechSynthesis.cancel();
     recognition.start();
-  }, [goNext]);
+  }, [goNext, goPrev]);
 
-  // Watch Me Cook handlers
-  const handleWatchConfirm = useCallback(async () => {
-    setShowWatchModal(false);
-    setWatchActive(true);
-    await startSession(currentStep);
-    // Speak the current step instruction once watching starts
-    if (currentInstruction) speakStep(currentInstruction);
-  }, [currentStep, currentInstruction, startSession, speakStep]);
+  const handleShare = useCallback(async () => {
+    const url = window.location.href;
+    const title = recipe ? `${recipe.title} — Sous` : "Recipe from Sous";
+    const text = recipe
+      ? `Check out this ${recipe.title} recipe on Sous:`
+      : "Check out this recipe on Sous:";
+    if (navigator.share) {
+      try {
+        await navigator.share({ title, text, url });
+        setShared(true);
+        setTimeout(() => setShared(false), 3000);
+        return;
+      } catch {}
+    }
+    try {
+      await navigator.clipboard.writeText(url);
+      setShared(true);
+      setTimeout(() => setShared(false), 3000);
+    } catch {
+      prompt("Copy this link:", url);
+    }
+  }, [recipe]);
 
-  const handleWatchStop = useCallback(() => {
-    stopSession();
-    setWatchActive(false);
-  }, [stopSession]);
-
-  // Hidden video element for the hook's camera stream
-  const hiddenVideoStyle: React.CSSProperties = {
-    position: "fixed",
-    top: -9999,
-    left: -9999,
-    width: 1,
-    height: 1,
-    opacity: 0,
-    pointerEvents: "none",
-  };
+  const handleStartCooking = useCallback(() => {
+    setCookMode(true);
+    setCurrentStep(0);
+    if (steps[0]) {
+      const prefix = stepCount === 1 ? "Final step. " : `Step 1 of ${stepCount}. `;
+      speakStep(steps[0].instruction, prefix);
+    }
+  }, [steps, stepCount, speakStep]);
 
   if (loading) {
     return (
-      <div style={styles.centered}>
-        <div style={styles.spinner} />
+      <div style={s.centered}>
+        <div style={s.spinner} />
         <p style={{ color: "#888", marginTop: 16 }}>Loading recipe…</p>
       </div>
     );
@@ -164,206 +152,240 @@ export default function RecipePage({ params }: { params: { id: string } }) {
 
   if (error || !recipe) {
     return (
-      <div style={styles.centered}>
+      <div style={s.centered}>
         <p style={{ color: "#FF6B6B", fontSize: 16 }}>{error || "Recipe not found."}</p>
-        <a href="/" style={styles.backLink}>
-          ← Back to Sous
-        </a>
+        <a href="/" style={s.backLink}>← Back to Sous</a>
       </div>
     );
   }
 
+  const progress = cookMode ? ((currentStep + 1) / stepCount) * 100 : 0;
+  const isLastStep = currentStep === stepCount - 1;
+
   return (
-    <div style={styles.page}>
-      {/* Hidden video element consumed by useWatchMeCook */}
-      <video ref={videoRef} style={hiddenVideoStyle} autoPlay playsInline muted />
+    <div style={s.page}>
 
-      {/* ── Header ── */}
-      <div style={styles.header}>
-        <a href="/" style={styles.backBtn}>
-          ← Back
-        </a>
+      {/* ── Hero card (OG-image-ready layout) ── */}
+      <div style={s.hero}>
+        <div style={s.heroInner}>
+          <div style={s.heroLogo}>🍳 Sous</div>
 
-        <div style={styles.headerMeta}>
-          {recipe.total_time_minutes > 0 && (
-            <span style={styles.metaBadge}>⏱ {recipe.total_time_minutes} min</span>
+          <div style={s.heroBadges}>
+            {recipe.difficulty && (
+              <span style={{ ...s.badge, ...difficultyColor(recipe.difficulty) }}>
+                {recipe.difficulty}
+              </span>
+            )}
+            {recipe.total_time_minutes > 0 && (
+              <span style={s.badge}>⏱ {recipe.total_time_minutes} min</span>
+            )}
+            {recipe.cuisine && (
+              <span style={s.badge}>{recipe.cuisine}</span>
+            )}
+            <span style={s.badge}>📋 {stepCount} steps</span>
+          </div>
+
+          <h1 style={s.heroTitle}>{recipe.title}</h1>
+
+          {recipe.description && (
+            <p style={s.heroDesc}>{recipe.description}</p>
           )}
-          {recipe.difficulty && (
-            <span style={styles.metaBadge}>{recipe.difficulty}</span>
-          )}
-          {recipe.cuisine && (
-            <span style={styles.metaBadge}>{recipe.cuisine}</span>
-          )}
+
+          <div style={s.heroActions}>
+            {!cookMode ? (
+              <button style={s.ctaBtn} onClick={handleStartCooking}>
+                🍳 Cook this with Sous
+              </button>
+            ) : (
+              <button style={{ ...s.ctaBtn, background: "#22c55e" }} onClick={() => {
+                window.speechSynthesis?.cancel();
+                setCookMode(false);
+                setCurrentStep(0);
+              }}>
+                ✓ Cooking mode on
+              </button>
+            )}
+            <button
+              style={{ ...s.shareBtn, ...(shared ? s.shareBtnDone : {}) }}
+              onClick={handleShare}
+            >
+              {shared ? "✓ Copied!" : "🔗 Share recipe"}
+            </button>
+          </div>
         </div>
-
-        <h1 style={styles.title}>{recipe.title}</h1>
-        {recipe.description && (
-          <p style={styles.description}>{recipe.description}</p>
-        )}
-
-        {/* Watch Me Cook button */}
-        <button
-          style={{
-            ...styles.watchBtn,
-            ...(watchActive ? styles.watchBtnActive : {}),
-          }}
-          onClick={() => {
-            if (watchActive) {
-              handleWatchStop();
-            } else {
-              setShowWatchModal(true);
-            }
-          }}
-        >
-          {watchActive ? "⏹ Stop Watching" : "👁️ Watch Me Cook"}
-        </button>
       </div>
 
+      {/* ── Cook mode progress bar ── */}
+      {cookMode && (
+        <div style={s.progressTrack}>
+          <div style={{ ...s.progressFill, width: `${progress}%` }} />
+        </div>
+      )}
+
       {/* ── Ingredients ── */}
-      <div style={styles.section}>
-        <h2 style={styles.sectionTitle}>Ingredients</h2>
-        <ul style={styles.ingredientList}>
+      <div style={s.section}>
+        <h2 style={s.sectionTitle}>Ingredients</h2>
+        <ul style={s.ingList}>
           {recipe.ingredients_used.map((ing, i) => (
-            <li key={i} style={styles.ingredientItem}>
-              <span style={styles.ingredientDot}>•</span>
+            <li key={i} style={s.ingItem}>
+              <span style={s.ingDot} />
               {ing}
             </li>
           ))}
         </ul>
-        {recipe.extra_ingredients_needed?.length > 0 && (
-          <>
-            <p style={styles.extraLabel}>You may also need:</p>
-            <ul style={styles.ingredientList}>
+        {(recipe.extra_ingredients_needed?.length ?? 0) > 0 && (
+          <div style={s.extraBlock}>
+            <p style={s.extraLabel}>You may also need:</p>
+            <ul style={s.ingList}>
               {recipe.extra_ingredients_needed.map((ing, i) => (
-                <li key={i} style={{ ...styles.ingredientItem, color: "#888" }}>
-                  <span style={styles.ingredientDot}>•</span>
+                <li key={i} style={{ ...s.ingItem, color: "#666" }}>
+                  <span style={{ ...s.ingDot, background: "#444" }} />
                   {ing}
                 </li>
               ))}
             </ul>
-          </>
+          </div>
         )}
       </div>
 
       {/* ── Steps ── */}
-      <div style={styles.section}>
-        <h2 style={styles.sectionTitle}>
-          Step {currentStep + 1} of {stepCount}
-        </h2>
-
-        <div style={styles.stepCard}>
-          <p style={styles.stepNumber}>Step {currentStep + 1}</p>
-          <p style={styles.stepInstruction}>{currentInstruction}</p>
-
-          {/* Speak button */}
-          <button
-            style={{
-              ...styles.speakBtn,
-              opacity: speaking ? 0.6 : 1,
-            }}
-            onClick={() => speakStep(currentInstruction)}
-            disabled={speaking}
-          >
-            {speaking ? "🔊 Speaking…" : "🔊 Read aloud"}
-          </button>
+      <div style={s.section}>
+        <div style={s.stepsHeader}>
+          <h2 style={s.sectionTitle}>
+            {cookMode
+              ? `Step ${currentStep + 1} of ${stepCount}`
+              : `Method — ${stepCount} steps`}
+          </h2>
+          {cookMode && (
+            <div style={s.listenRow}>
+              <button
+                style={{
+                  ...s.listenBtn,
+                  ...(listening ? s.listenBtnActive : {}),
+                }}
+                onClick={startListening}
+                disabled={listening}
+                title='Say "next" or "back"'
+              >
+                {listening ? "🎙 Listening…" : "🎙 Voice"}
+              </button>
+              <button
+                style={s.speakBtn}
+                onClick={() => speakStep(currentInstruction)}
+                disabled={speaking}
+              >
+                {speaking ? "🔊…" : "🔊"}
+              </button>
+            </div>
+          )}
         </div>
 
-        {/* Voice listener */}
-        <button
-          style={{
-            ...styles.listenBtn,
-            background: listening ? "#1a3a1a" : "#111",
-            borderColor: listening ? "#4CAF50" : "#333",
-            color: listening ? "#4CAF50" : "#888",
-          }}
-          onClick={startListening}
-          disabled={listening}
-        >
-          {listening ? '🎙️ Listening for "next"…' : '🎙️ Say "next" to advance'}
-        </button>
-
-        {/* Watch Me Cook AI check feedback */}
-        {watchActive && session.lastCheck && (
-          <div style={styles.aiCheckCard}>
-            <p style={styles.aiCheckObs}>{session.lastCheck.observation}</p>
-            <p style={styles.aiCheckEnc}>{session.lastCheck.encouragement}</p>
-            {session.lastCheck.ready && (
-              <p style={styles.aiCheckReady}>✅ Looks ready to move on!</p>
+        {/* Cook mode: single active step card */}
+        {cookMode && (
+          <div style={s.activeStepCard}>
+            <div style={s.activeStepNum}>Step {currentStep + 1}</div>
+            <p style={s.activeStepText}>{currentInstruction}</p>
+            {speaking && (
+              <div style={s.speakingBadge}>
+                <span style={s.speakingDot} /> Reading aloud…
+              </div>
+            )}
+            {listening && (
+              <div style={s.listeningBadge}>
+                <span style={s.listeningDot} /> Listening for "next" or "back"…
+              </div>
             )}
           </div>
         )}
 
-        {/* Navigation */}
-        <div style={styles.navRow}>
-          <button
-            style={{
-              ...styles.navBtn,
-              opacity: currentStep === 0 ? 0.35 : 1,
-            }}
-            onClick={goPrev}
-            disabled={currentStep === 0}
-          >
-            ← Previous
-          </button>
-
-          {currentStep < stepCount - 1 ? (
-            <button style={styles.nextBtn} onClick={goNext}>
-              Next Step →
-            </button>
-          ) : (
-            <button style={{ ...styles.nextBtn, background: "#4CAF50" }}>
-              🎉 Done!
-            </button>
-          )}
-        </div>
-
-        {/* All steps list (collapsed view) */}
-        <div style={styles.allSteps}>
-          {steps.map((step, i) => (
+        {/* Navigation (cook mode) */}
+        {cookMode && (
+          <div style={s.navRow}>
             <button
-              key={step.step_number}
-              style={{
-                ...styles.stepPill,
-                background: i === currentStep ? "#FF6B35" : i < currentStep ? "#2a2a2a" : "#111",
-                color: i === currentStep ? "#fff" : i < currentStep ? "#666" : "#aaa",
-                border: i === currentStep ? "none" : "1px solid #222",
-              }}
-              onClick={() => setCurrentStep(i)}
+              style={{ ...s.navBtn, opacity: currentStep === 0 ? 0.3 : 1 }}
+              onClick={goPrev}
+              disabled={currentStep === 0}
             >
-              {i < currentStep ? "✓" : i + 1}
+              ← Prev
             </button>
-          ))}
-        </div>
+            {!isLastStep ? (
+              <button style={s.nextBtn} onClick={goNext}>
+                Next →
+              </button>
+            ) : (
+              <button
+                style={{ ...s.nextBtn, background: "#22c55e" }}
+                onClick={() => { window.speechSynthesis?.cancel(); setCookMode(false); }}
+              >
+                🎉 Done!
+              </button>
+            )}
+          </div>
+        )}
+
+        {/* All steps — read-only list (always shown) or step pills in cook mode */}
+        {!cookMode ? (
+          <ol style={s.stepList}>
+            {steps.map((step, i) => (
+              <li key={step.step_number} style={s.stepListItem}>
+                <div style={s.stepListNum}>{step.step_number}</div>
+                <p style={s.stepListText}>{step.instruction}</p>
+              </li>
+            ))}
+          </ol>
+        ) : (
+          <div style={s.stepPills}>
+            {steps.map((step, i) => (
+              <button
+                key={step.step_number}
+                style={{
+                  ...s.stepPill,
+                  background:
+                    i === currentStep ? "#FF6B35"
+                    : i < currentStep ? "#1a2a1a"
+                    : "#111",
+                  color:
+                    i === currentStep ? "#fff"
+                    : i < currentStep ? "#4ade80"
+                    : "#555",
+                  border:
+                    i === currentStep ? "none"
+                    : i < currentStep ? "1px solid #22c55e44"
+                    : "1px solid #222",
+                }}
+                onClick={() => setCurrentStep(i)}
+                title={`Step ${i + 1}`}
+              >
+                {i < currentStep ? "✓" : i + 1}
+              </button>
+            ))}
+          </div>
+        )}
       </div>
 
-      {/* ── Watch Me Cook Modal ── */}
-      {showWatchModal && (
-        <WatchMeCookModal
-          recipeName={recipe.title}
-          stepCount={stepCount}
-          onConfirm={handleWatchConfirm}
-          onCancel={() => setShowWatchModal(false)}
-        />
-      )}
-
-      {/* ── Watch Me Cook Overlay ── */}
-      {watchActive && (
-        <WatchMeCookOverlay
-          onStop={handleWatchStop}
-          stepInstruction={currentInstruction}
-        />
-      )}
+      {/* ── Footer CTA ── */}
+      <div style={s.footer}>
+        <p style={s.footerText}>Made with Sous — the hands-free kitchen assistant</p>
+        <a href="/" style={s.footerLink}>Try Sous with your own ingredients →</a>
+      </div>
     </div>
   );
 }
 
-const styles: Record<string, React.CSSProperties> = {
+function difficultyColor(d: string): React.CSSProperties {
+  const l = d.toLowerCase();
+  if (l === "easy") return { background: "#0d2b0d", color: "#4ade80", borderColor: "#22c55e44" };
+  if (l === "hard") return { background: "#2b0d0d", color: "#f87171", borderColor: "#ef444444" };
+  return { background: "#2b1f0d", color: "#fbbf24", borderColor: "#f59e0b44" };
+}
+
+const s: Record<string, React.CSSProperties> = {
   page: {
     minHeight: "100dvh",
     background: "#0a0a0a",
     color: "#fff",
     fontFamily: "-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif",
-    paddingBottom: 120,
+    paddingBottom: 80,
   },
   centered: {
     minHeight: "100dvh",
@@ -374,6 +396,7 @@ const styles: Record<string, React.CSSProperties> = {
     background: "#0a0a0a",
     color: "#fff",
     fontFamily: "-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif",
+    gap: 12,
   },
   spinner: {
     width: 36,
@@ -386,189 +409,293 @@ const styles: Record<string, React.CSSProperties> = {
   backLink: {
     color: "#FF6B35",
     textDecoration: "none",
-    marginTop: 16,
     fontSize: 15,
   },
 
-  // Header
-  header: {
-    padding: "32px 20px 24px",
-    borderBottom: "1px solid #1a1a1a",
+  // ── Hero ──────────────────────────────────────────────
+  hero: {
+    background: "linear-gradient(160deg, #1a0e00 0%, #0f0f0f 60%, #0a0a0a 100%)",
+    borderBottom: "1px solid #1e1400",
+    padding: "0 0 32px",
   },
-  backBtn: {
-    display: "inline-block",
-    color: "#888",
-    textDecoration: "none",
-    fontSize: 14,
-    marginBottom: 16,
+  heroInner: {
+    maxWidth: 680,
+    margin: "0 auto",
+    padding: "32px 24px 0",
+    display: "flex",
+    flexDirection: "column",
+    gap: 16,
   },
-  headerMeta: {
+  heroLogo: {
+    fontSize: 15,
+    fontWeight: 800,
+    color: "#FF6B35",
+    letterSpacing: 0.5,
+  },
+  heroBadges: {
     display: "flex",
     flexWrap: "wrap",
     gap: 8,
-    marginBottom: 12,
   },
-  metaBadge: {
+  badge: {
     background: "#1a1a1a",
     color: "#888",
+    border: "1px solid #2a2a2a",
     borderRadius: 20,
     padding: "4px 12px",
     fontSize: 12,
-    border: "1px solid #222",
+    fontWeight: 600,
   },
-  title: {
-    fontSize: 28,
-    fontWeight: 800,
-    margin: "0 0 8px",
-    lineHeight: 1.2,
+  heroTitle: {
+    fontSize: "clamp(28px, 6vw, 48px)",
+    fontWeight: 900,
+    margin: 0,
+    lineHeight: 1.1,
+    letterSpacing: -0.5,
+    color: "#fff",
   },
-  description: {
-    color: "#888",
-    fontSize: 15,
-    lineHeight: 1.55,
-    margin: "0 0 20px",
+  heroDesc: {
+    color: "#aaa",
+    fontSize: 16,
+    lineHeight: 1.6,
+    margin: 0,
+    maxWidth: 560,
   },
-
-  // Watch Me Cook button
-  watchBtn: {
-    display: "inline-flex",
-    alignItems: "center",
-    gap: 8,
-    background: "#1a1a1a",
-    color: "#FF6B35",
-    border: "1px solid #FF6B3544",
+  heroActions: {
+    display: "flex",
+    gap: 12,
+    flexWrap: "wrap",
+  },
+  ctaBtn: {
+    background: "#FF6B35",
+    color: "#fff",
+    border: "none",
     borderRadius: 14,
-    padding: "12px 20px",
+    padding: "16px 28px",
+    fontSize: 17,
+    fontWeight: 800,
+    cursor: "pointer",
+    letterSpacing: 0.2,
+    flex: "1 1 200px",
+    transition: "opacity 0.2s",
+  },
+  shareBtn: {
+    background: "#1a1a1a",
+    color: "#aaa",
+    border: "1px solid #333",
+    borderRadius: 14,
+    padding: "16px 24px",
     fontSize: 15,
     fontWeight: 700,
     cursor: "pointer",
-    letterSpacing: 0.2,
+    flex: "0 0 auto",
+    transition: "all 0.2s",
   },
-  watchBtnActive: {
-    background: "#1a0a0a",
-    color: "#FF6B6B",
-    borderColor: "#FF6B6B44",
+  shareBtnDone: {
+    background: "#0d2b0d",
+    color: "#4ade80",
+    borderColor: "#22c55e44",
   },
 
-  // Sections
+  // ── Progress bar ──────────────────────────────────────
+  progressTrack: {
+    height: 4,
+    background: "#1a1a1a",
+    width: "100%",
+  },
+  progressFill: {
+    height: "100%",
+    background: "#FF6B35",
+    transition: "width 0.4s ease",
+  },
+
+  // ── Sections ──────────────────────────────────────────
   section: {
-    padding: "24px 20px",
-    borderBottom: "1px solid #1a1a1a",
+    maxWidth: 680,
+    margin: "0 auto",
+    padding: "32px 24px",
+    borderBottom: "1px solid #111",
   },
   sectionTitle: {
-    fontSize: 18,
-    fontWeight: 700,
-    margin: "0 0 16px",
+    fontSize: 20,
+    fontWeight: 800,
+    margin: "0 0 20px",
     color: "#fff",
   },
+  stepsHeader: {
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "space-between",
+    marginBottom: 20,
+    gap: 12,
+    flexWrap: "wrap",
+  },
 
-  // Ingredients
-  ingredientList: {
+  // ── Ingredients ───────────────────────────────────────
+  ingList: {
     listStyle: "none",
     margin: 0,
     padding: 0,
     display: "flex",
     flexDirection: "column",
-    gap: 8,
-  },
-  ingredientItem: {
-    display: "flex",
-    alignItems: "flex-start",
     gap: 10,
+  },
+  ingItem: {
+    display: "flex",
+    alignItems: "center",
+    gap: 12,
     color: "#ccc",
     fontSize: 15,
     lineHeight: 1.45,
   },
-  ingredientDot: {
-    color: "#FF6B35",
+  ingDot: {
+    width: 8,
+    height: 8,
+    borderRadius: "50%",
+    background: "#FF6B35",
     flexShrink: 0,
-    marginTop: 1,
+  },
+  extraBlock: {
+    marginTop: 20,
+    paddingTop: 20,
+    borderTop: "1px solid #1a1a1a",
   },
   extraLabel: {
-    color: "#666",
+    color: "#555",
     fontSize: 13,
-    margin: "16px 0 8px",
+    margin: "0 0 12px",
+    fontWeight: 600,
+    textTransform: "uppercase",
+    letterSpacing: 0.5,
   },
 
-  // Steps
-  stepCard: {
-    background: "#111",
-    borderRadius: 20,
-    padding: "24px 20px",
-    border: "1px solid #222",
-    marginBottom: 16,
+  // ── Steps (read-only list) ────────────────────────────
+  stepList: {
+    margin: 0,
+    padding: 0,
+    listStyle: "none",
+    display: "flex",
+    flexDirection: "column",
+    gap: 16,
   },
-  stepNumber: {
+  stepListItem: {
+    display: "flex",
+    gap: 16,
+    alignItems: "flex-start",
+  },
+  stepListNum: {
+    width: 32,
+    height: 32,
+    borderRadius: "50%",
+    background: "#1a1a1a",
+    border: "1px solid #2a2a2a",
+    color: "#FF6B35",
+    fontSize: 13,
+    fontWeight: 800,
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+    flexShrink: 0,
+    marginTop: 2,
+  },
+  stepListText: {
+    color: "#ccc",
+    fontSize: 15,
+    lineHeight: 1.65,
+    margin: 0,
+    paddingTop: 4,
+  },
+
+  // ── Cook mode: active step ────────────────────────────
+  activeStepCard: {
+    background: "#111",
+    border: "1px solid #2a2a2a",
+    borderRadius: 20,
+    padding: "28px 24px",
+    marginBottom: 20,
+    display: "flex",
+    flexDirection: "column",
+    gap: 14,
+  },
+  activeStepNum: {
     color: "#FF6B35",
     fontSize: 12,
-    fontWeight: 700,
-    letterSpacing: 1,
+    fontWeight: 800,
+    letterSpacing: 1.5,
     textTransform: "uppercase",
-    margin: "0 0 10px",
   },
-  stepInstruction: {
+  activeStepText: {
     color: "#fff",
-    fontSize: 18,
-    lineHeight: 1.6,
-    margin: "0 0 18px",
+    fontSize: 22,
+    fontWeight: 700,
+    lineHeight: 1.5,
+    margin: 0,
+  },
+  speakingBadge: {
+    display: "inline-flex",
+    alignItems: "center",
+    gap: 8,
+    color: "#94a3b8",
+    fontSize: 13,
+    fontWeight: 600,
+  },
+  speakingDot: {
+    width: 8,
+    height: 8,
+    borderRadius: "50%",
+    background: "#94a3b8",
+    display: "inline-block",
+    animation: "pulse 1.2s ease-in-out infinite",
+  },
+  listeningBadge: {
+    display: "inline-flex",
+    alignItems: "center",
+    gap: 8,
+    color: "#86efac",
+    fontSize: 13,
+    fontWeight: 600,
+  },
+  listeningDot: {
+    width: 8,
+    height: 8,
+    borderRadius: "50%",
+    background: "#22c55e",
+    display: "inline-block",
+    boxShadow: "0 0 0 3px #22c55e33",
+    animation: "pulse 1.2s ease-in-out infinite",
+  },
+
+  // ── Cook mode controls ────────────────────────────────
+  listenRow: {
+    display: "flex",
+    gap: 8,
+    alignItems: "center",
+    flexShrink: 0,
+  },
+  listenBtn: {
+    background: "#1a1a1a",
+    color: "#888",
+    border: "1px solid #333",
+    borderRadius: 10,
+    padding: "8px 14px",
+    fontSize: 13,
+    fontWeight: 700,
+    cursor: "pointer",
+  },
+  listenBtnActive: {
+    background: "#0d2b0d",
+    color: "#4ade80",
+    borderColor: "#22c55e44",
   },
   speakBtn: {
     background: "#1a1a1a",
-    color: "#aaa",
+    color: "#888",
     border: "1px solid #333",
-    borderRadius: 12,
-    padding: "10px 16px",
-    fontSize: 14,
+    borderRadius: 10,
+    padding: "8px 12px",
+    fontSize: 16,
     cursor: "pointer",
-    display: "inline-flex",
-    alignItems: "center",
-    gap: 6,
   },
-
-  // Listen button
-  listenBtn: {
-    width: "100%",
-    border: "1px solid",
-    borderRadius: 14,
-    padding: "14px 20px",
-    fontSize: 15,
-    fontWeight: 600,
-    cursor: "pointer",
-    marginBottom: 16,
-    textAlign: "center",
-  },
-
-  // AI check card
-  aiCheckCard: {
-    background: "#0d1f0d",
-    border: "1px solid #4CAF5044",
-    borderRadius: 16,
-    padding: "16px 18px",
-    marginBottom: 16,
-    display: "flex",
-    flexDirection: "column",
-    gap: 6,
-  },
-  aiCheckObs: {
-    color: "#ccc",
-    fontSize: 14,
-    margin: 0,
-    lineHeight: 1.5,
-  },
-  aiCheckEnc: {
-    color: "#4CAF50",
-    fontSize: 13,
-    margin: 0,
-    fontWeight: 600,
-  },
-  aiCheckReady: {
-    color: "#4CAF50",
-    fontSize: 14,
-    fontWeight: 700,
-    margin: 0,
-  },
-
-  // Navigation
   navRow: {
     display: "flex",
     gap: 12,
@@ -576,9 +703,9 @@ const styles: Record<string, React.CSSProperties> = {
   },
   navBtn: {
     flex: 1,
-    background: "#111",
+    background: "#1a1a1a",
     color: "#888",
-    border: "1px solid #222",
+    border: "1px solid #333",
     borderRadius: 14,
     padding: "16px 20px",
     fontSize: 15,
@@ -593,13 +720,11 @@ const styles: Record<string, React.CSSProperties> = {
     borderRadius: 14,
     padding: "16px 20px",
     fontSize: 16,
-    fontWeight: 700,
+    fontWeight: 800,
     cursor: "pointer",
     letterSpacing: 0.3,
   },
-
-  // Step pills
-  allSteps: {
+  stepPills: {
     display: "flex",
     flexWrap: "wrap",
     gap: 8,
@@ -614,5 +739,28 @@ const styles: Record<string, React.CSSProperties> = {
     display: "flex",
     alignItems: "center",
     justifyContent: "center",
+  },
+
+  // ── Footer ────────────────────────────────────────────
+  footer: {
+    maxWidth: 680,
+    margin: "0 auto",
+    padding: "40px 24px 60px",
+    display: "flex",
+    flexDirection: "column",
+    alignItems: "center",
+    gap: 12,
+    textAlign: "center",
+  },
+  footerText: {
+    color: "#333",
+    fontSize: 13,
+    margin: 0,
+  },
+  footerLink: {
+    color: "#FF6B35",
+    textDecoration: "none",
+    fontSize: 15,
+    fontWeight: 700,
   },
 };

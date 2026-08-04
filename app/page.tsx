@@ -63,7 +63,9 @@ export default function SousPage() {
   const [pantryLoading, setPantryLoading] = useState(false);
 
   const [recipes, setRecipes] = useState<Recipe[]>([]);
+  const [recipeUuids, setRecipeUuids] = useState<Record<string, string>>({});
   const [activeRecipe, setActiveRecipe] = useState<Recipe | null>(null);
+  const [activeRecipeUuid, setActiveRecipeUuid] = useState<string | null>(null);
   const [pendingRecipe, setPendingRecipe] = useState<Recipe | null>(null);
   const [showWatchModal, setShowWatchModal] = useState(false);
   const [cookingStep, setCookingStep] = useState(0);
@@ -524,9 +526,10 @@ export default function SousPage() {
 
   const startCooking = useCallback((recipe: Recipe) => {
     setActiveRecipe(recipe);
+    setActiveRecipeUuid(recipeUuids[recipe.title] ?? null);
     setCookingStep(0);
     setAppState("cooking");
-  }, []);
+  }, [recipeUuids]);
 
   const requestStartCooking = useCallback((recipe: Recipe) => {
     setPendingRecipe(recipe);
@@ -542,6 +545,7 @@ export default function SousPage() {
     }
     setListeningForNext(false);
     setActiveRecipe(null);
+    setActiveRecipeUuid(null);
     setCookingStep(0);
     setAppState("recipes");
   }, []);
@@ -613,7 +617,30 @@ Search your knowledge of real recipes from cookbooks and food websites. Give me 
         const match = text.match(/\[[\s\S]*\]/);
         if (match) parsed = JSON.parse(match[0]);
       }
-      setRecipes(parsed.filter((r) => r && r.title && Array.isArray(r.steps)));
+      const valid = parsed.filter((r) => r && r.title && Array.isArray(r.steps));
+      setRecipes(valid);
+
+      // Persist recipes to DB and collect UUIDs for sharing
+      try {
+        const uuidMap: Record<string, string> = {};
+        await Promise.all(
+          valid.map(async (recipe) => {
+            const saveRes = await fetch("/api/recipes", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ recipe }),
+            });
+            if (saveRes.ok) {
+              const { uuid } = await saveRes.json();
+              if (uuid) uuidMap[recipe.title] = uuid;
+            }
+          })
+        );
+        setRecipeUuids(uuidMap);
+      } catch {
+        // non-fatal — sharing just won't have a UUID
+      }
+
       setAppState("recipes");
     } catch (err: unknown) {
       setRecipeError(err instanceof Error ? err.message : "Failed to find recipes");
@@ -662,7 +689,9 @@ Search your knowledge of real recipes from cookbooks and food websites. Give me 
     setEditingIndex(null);
     setEditingValue("");
     setRecipes([]);
+    setRecipeUuids({});
     setActiveRecipe(null);
+    setActiveRecipeUuid(null);
     setCookingStep(0);
     setRecipeError("");
     synthStopRef.current = true;
@@ -1291,6 +1320,35 @@ Search your knowledge of real recipes from cookbooks and food websites. Give me 
   }
 
   if (appState === "done") {
+    const shareUrl = activeRecipeUuid
+      ? `${typeof window !== "undefined" ? window.location.origin : ""}/recipe/${activeRecipeUuid}`
+      : null;
+
+    const handleShare = async () => {
+      if (!shareUrl) return;
+      if (navigator.share) {
+        try {
+          await navigator.share({
+            title: activeRecipe ? `${activeRecipe.title} — Sous` : "Recipe from Sous",
+            text: activeRecipe
+              ? `I just cooked ${activeRecipe.title} with Sous! Check out the recipe:`
+              : "Check out this recipe from Sous:",
+            url: shareUrl,
+          });
+        } catch {
+          // user cancelled or share failed — fall through to clipboard
+          try { await navigator.clipboard.writeText(shareUrl); alert("Link copied!"); } catch {}
+        }
+      } else {
+        try {
+          await navigator.clipboard.writeText(shareUrl);
+          alert("Recipe link copied to clipboard!");
+        } catch {
+          prompt("Copy this link:", shareUrl);
+        }
+      }
+    };
+
     return (
       <div style={styles.fullscreen}>
         <div style={styles.doneCard}>
@@ -1301,6 +1359,11 @@ Search your knowledge of real recipes from cookbooks and food websites. Give me 
           <p style={styles.doneSub}>
             Great cooking! Ready to make something else?
           </p>
+          {shareUrl && (
+            <button style={styles.shareBtn} onClick={handleShare}>
+              🔗 Share this recipe
+            </button>
+          )}
           {recipes.length > 0 && (
             <button
               style={{ ...styles.secondaryBtn, marginBottom: 8 }}
@@ -2101,6 +2164,23 @@ const styles: Record<string, React.CSSProperties> = {
     fontSize: 11,
     marginLeft: 6,
     opacity: 0.7,
+  },
+
+  shareBtn: {
+    background: "#1a1a2e",
+    color: "#818cf8",
+    border: "1px solid #3730a344",
+    borderRadius: 16,
+    padding: "16px 24px",
+    fontSize: 16,
+    fontWeight: 700,
+    cursor: "pointer",
+    width: "100%",
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 8,
+    transition: "opacity 0.2s",
   },
 
   // Done
