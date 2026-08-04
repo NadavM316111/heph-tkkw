@@ -33,6 +33,7 @@ interface Recipe {
   ingredients_used: string[];
   extra_ingredients_needed: string[];
   steps: RecipeStep[];
+  source_inspiration?: string;
 }
 
 export default function SousPage() {
@@ -401,22 +402,29 @@ export default function SousPage() {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          system: `You are a creative chef assistant. Given a list of ingredients, suggest 3 recipes the user could make. 
-Respond with ONLY a JSON array — no markdown, no explanation. Each recipe object must have exactly:
+          system: `You are a world-class chef with encyclopaedic knowledge of real, named recipes from cookbooks, food websites (BBC Good Food, Serious Eats, NYT Cooking, AllRecipes, Bon Appétit, etc.), and culinary traditions worldwide.
+
+Given a list of ingredients, suggest 3 REAL, SPECIFIC, NAMED recipes a home cook could actually make — dishes people would genuinely search for online. Prefer well-known classics or popular modern recipes over generic inventions. If the ingredients strongly suggest a particular cuisine or dish, lean into that.
+
+Respond with ONLY a JSON array — no markdown, no explanation. Each recipe object must have exactly these fields:
 {
-  "title": string,
-  "description": string (1-2 sentences),
+  "title": string (the real, specific dish name, e.g. "Spaghetti Carbonara" not "Pasta Dish"),
+  "description": string (1-2 sentences describing the dish and why it works with these ingredients),
   "total_time_minutes": number,
   "difficulty": "easy"|"medium"|"hard",
-  "ingredients_used": string[],
-  "extra_ingredients_needed": string[],
+  "ingredients_used": string[] (from the user's list),
+  "extra_ingredients_needed": string[] (common pantry items or extras needed),
+  "source_inspiration": string (e.g. "Classic Roman recipe", "BBC Good Food favourite", "Serious Eats method", "Traditional Thai street food"),
   "steps": [{ "step_number": number, "instruction": string }]
 }
-Steps should be clear, concise, kitchen-friendly instructions. Aim for 5-10 steps per recipe.`,
+
+Steps must be detailed, practical, kitchen-tested instructions a home cook can follow confidently. Aim for 6-10 steps. Include temperatures, timings, and visual cues (e.g. "cook until golden brown, about 3 minutes").`,
           messages: [
             {
               role: "user",
-              content: `I have these ingredients: ${ingredients.join(", ")}. What can I make?`,
+              content: `I have these ingredients available: ${ingredients.join(", ")}.
+
+Search your knowledge of real recipes from cookbooks and food websites. Give me 3 specific, named dishes I can actually make — ideally ones I could look up online to verify. Prioritise recipes that use most of my ingredients well.`,
             },
           ],
         }),
@@ -849,6 +857,9 @@ Steps should be clear, concise, kitchen-friendly instructions. Aim for 5-10 step
                 <span style={styles.recipeBadge}>{recipe.difficulty}</span>
               </div>
               <p style={styles.recipeDesc}>{recipe.description}</p>
+              {recipe.source_inspiration && (
+                <p style={styles.recipeSource}>🔗 {recipe.source_inspiration}</p>
+              )}
               <div style={styles.recipeMeta}>
                 <span>⏱ {recipe.total_time_minutes} min</span>
                 <span>📋 {recipe.steps.length} steps</span>
@@ -1420,6 +1431,13 @@ const styles: Record<string, React.CSSProperties> = {
     fontSize: 14,
     margin: 0,
     lineHeight: 1.5,
+  },
+  recipeSource: {
+    color: "#FF6B35",
+    fontSize: 12,
+    fontWeight: 600,
+    margin: 0,
+    opacity: 0.85,
   },
   recipeMeta: {
     display: "flex",
