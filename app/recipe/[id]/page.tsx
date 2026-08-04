@@ -279,7 +279,7 @@ export default function RecipePage({ params }: { params: { id: string } }) {
           onClick={startListening}
           disabled={listening}
         >
-          {listening ? "🎙️ Listening for "next"…" : "🎙️ Say "next" to advance"}
+          {listening ? '🎙️ Listening for "next"…' : '🎙️ Say "next" to advance'}
         </button>
 
         {/* Watch Me Cook AI check feedback */}
