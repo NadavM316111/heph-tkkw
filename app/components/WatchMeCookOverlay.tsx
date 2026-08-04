@@ -81,6 +81,10 @@ export default function WatchMeCookOverlay({
     commentaryEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [commentaryLog]);
 
+  const addCommentary = useCallback((text: string, isError = false) => {
+    setCommentaryLog((prev) => [...prev.slice(-19), { text, ts: Date.now(), isError }]);
+  }, []);
+
   // ── Substitute via voice ──────────────────────────────────────────────
   const triggerSubstitute = useCallback(async (ingredient: string) => {
     if (!ingredient.trim()) return;
@@ -196,10 +200,6 @@ export default function WatchMeCookOverlay({
     const sec = (s % 60).toString().padStart(2, "0");
     return `${m}:${sec}`;
   };
-
-  const addCommentary = useCallback((text: string, isError = false) => {
-    setCommentaryLog((prev) => [...prev.slice(-19), { text, ts: Date.now(), isError }]);
-  }, []);
 
   /**
    * Captures a frame, asks the AI, updates state, and returns
