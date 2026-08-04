@@ -20,6 +20,148 @@ interface Recipe {
   cuisine: string;
 }
 
+// ── Quantity scaling ──────────────────────────────────────────────────────────
+
+// Matches patterns like:
+//   "2 tbsp", "1/2 cup", "1½ tsp", "3-4 cloves", "200g", "0.5 kg"
+// Capture groups: [fullMatch, quantity, unit?]
+const QTY_RE =
+  /\b(\d+(?:[./]\d+)?(?:\s*[–\-]\s*\d+(?:[./]\d+)?)?|\d*[½⅓⅔¼¾⅛⅜⅝⅞])\s*(tbsp|tablespoons?|tsp|teaspoons?|cups?|oz|ounces?|lbs?|pounds?|kg|g|ml|l|litres?|liters?|cloves?|slices?|pieces?|inch(?:es)?|cm|mm|pinch(?:es)?|handfuls?|sprigs?|bunches?|cans?|jars?|packets?|portions?|servings?)?\b/gi;
+
+const VULGAR: Record<string, number> = {
+  "½": 0.5, "⅓": 1 / 3, "⅔": 2 / 3,
+  "¼": 0.25, "¾": 0.75,
+  "⅛": 0.125, "⅜": 0.375, "⅝": 0.625, "⅞": 0.875,
+};
+
+/** Parse a quantity token (may contain ranges like "2-3" or fractions "1/2") */
+function parseQty(raw: string): number | null {
+  const t = raw.trim();
+  // vulgar fraction alone
+  if (VULGAR[t]) return VULGAR[t];
+  // "1½" style compound
+  for (const [ch, val] of Object.entries(VULGAR)) {
+    if (t.endsWith(ch)) {
+      const prefix = parseFloat(t.slice(0, -ch.length));
+      if (!isNaN(prefix)) return prefix + val;
+    }
+  }
+  // range "2-3" or "2–3" → use midpoint
+  const rangeM = t.match(/^(\d+(?:\.\d+)?)\s*[–\-]\s*(\d+(?:\.\d+)?)$/);
+  if (rangeM) return (parseFloat(rangeM[1]) + parseFloat(rangeM[2])) / 2;
+  // fraction "1/2"
+  const fracM = t.match(/^(\d+)\/(\d+)$/);
+  if (fracM) return parseInt(fracM[1]) / parseInt(fracM[2]);
+  const n = parseFloat(t);
+  return isNaN(n) ? null : n;
+}
+
+/** Format a scaled number back to a readable string */
+function formatQty(n: number): string {
+  // Express very close simple fractions nicely
+  const fracs: [number, string][] = [
+    [0.125, "⅛"], [0.25, "¼"], [1 / 3, "⅓"], [0.375, "⅜"],
+    [0.5, "½"], [0.625, "⅝"], [2 / 3, "⅔"], [0.75, "¾"], [0.875, "⅞"],
+  ];
+  // whole + vulgar: e.g. 1.5 → "1½"
+  const whole = Math.floor(n);
+  const frac = n - whole;
+  for (const [val, sym] of fracs) {
+    if (Math.abs(frac - val) < 0.04) {
+      return whole > 0 ? `${whole}${sym}` : sym;
+    }
+  }
+  // whole number
+  if (Math.abs(n - Math.round(n)) < 0.05) return String(Math.round(n));
+  // one decimal place
+  return n.toFixed(1).replace(/\.0$/, "");
+}
+
+/**
+ * Returns true if the match looks like a genuine cooking quantity rather than
+ * an incidental number (e.g. "step 2", "375°F", "30 minutes").
+ */
+function looksLikeCookingQty(fullMatch: string, unit: string | undefined): boolean {
+  if (unit) return true; // any recognised unit → scale it
+  // bare numbers we do NOT auto-scale (temperatures, times, step numbers, etc.)
+  return false;
+}
+
+/**
+ * Scale all recognised quantity mentions in a text string by `multiplier`.
+ * Returns the scaled string AND a boolean indicating whether any "ambiguous"
+ * quantities (bare numbers without a recognised unit) were skipped.
+ */
+function scaleText(
+  text: string,
+  multiplier: number
+): { scaled: string; hasAmbiguous: boolean } {
+  if (multiplier === 1) return { scaled: text, hasAmbiguous: false };
+  let hasAmbiguous = false;
+
+  const scaled = text.replace(QTY_RE, (match, qty, unit) => {
+    if (!looksLikeCookingQty(match, unit)) {
+      hasAmbiguous = true; // bare number — leave as-is, flag for AI
+      return match;
+    }
+    const val = parseQty(qty);
+    if (val === null) {
+      hasAmbiguous = true;
+      return match;
+    }
+    const newVal = formatQty(val * multiplier);
+    return unit ? `${newVal} ${unit}` : newVal;
+  });
+
+  return { scaled, hasAmbiguous };
+}
+
+/** Cache for AI-scaled strings: key = `${multiplier}::${originalText}` */
+const aiScaleCache = new Map<string, string>();
+
+/**
+ * Ask the AI to rewrite a single sentence with scaled quantities.
+ * Result is cached so the same sentence is never sent twice.
+ */
+async function aiScaleText(
+  text: string,
+  multiplier: number
+): Promise<string> {
+  const cacheKey = `${multiplier}::${text}`;
+  if (aiScaleCache.has(cacheKey)) return aiScaleCache.get(cacheKey)!;
+
+  try {
+    const res = await fetch("/api/ai", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        system:
+          "You rewrite cooking instructions with scaled quantities. " +
+          "Return ONLY the rewritten sentence, no explanation, no quotes.",
+        messages: [
+          {
+            role: "user",
+            content: `Multiply every quantity in this cooking instruction by ${multiplier}. ` +
+              `Do NOT change anything except the numbers/quantities. ` +
+              `Instruction: ${text}`,
+          },
+        ],
+      }),
+    });
+    if (!res.ok) throw new Error("AI call failed");
+    const { text: result } = await res.json();
+    const trimmed = result?.trim() ?? text;
+    aiScaleCache.set(cacheKey, trimmed);
+    return trimmed;
+  } catch {
+    return text; // graceful fallback: show unscaled
+  }
+}
+
+// ── Multiplier options ────────────────────────────────────────────────────────
+const MULTIPLIERS = [0.5, 1, 2, 3] as const;
+type Multiplier = typeof MULTIPLIERS[number];
+
 export default function RecipePage({ params }: { params: { id: string } }) {
   const [recipe, setRecipe] = useState<Recipe | null>(null);
   const [loading, setLoading] = useState(true);
@@ -34,6 +176,15 @@ export default function RecipePage({ params }: { params: { id: string } }) {
   const [savedForOffline, setSavedForOffline] = useState(false);
   const recognitionRef = useRef<any>(null);
 
+  // ── Serving multiplier state ──────────────────────────────────────────────
+  const [multiplier, setMultiplier] = useState<Multiplier>(1);
+  // scaledIngredients / scaledSteps hold the display-ready strings after scaling
+  const [scaledIngredients, setScaledIngredients] = useState<string[]>([]);
+  const [scaledExtra, setScaledExtra] = useState<string[]>([]);
+  const [scaledSteps, setScaledSteps] = useState<RecipeStep[]>([]);
+  // Tracks which step indices are currently being AI-resolved
+  const [aiPending, setAiPending] = useState<Set<number>>(new Set());
+
   // Offline detection
   useEffect(() => {
     if (typeof window === "undefined") return;
@@ -47,6 +198,68 @@ export default function RecipePage({ params }: { params: { id: string } }) {
       window.removeEventListener("offline", goOffline);
     };
   }, []);
+
+  // ── Apply scaling whenever recipe or multiplier changes ──────────────────
+  useEffect(() => {
+    if (!recipe) return;
+
+    // Scale ingredients immediately (regex only)
+    const newIngredients = recipe.ingredients_used.map(
+      (ing) => scaleText(ing, multiplier).scaled
+    );
+    const newExtra = (recipe.extra_ingredients_needed ?? []).map(
+      (ing) => scaleText(ing, multiplier).scaled
+    );
+    setScaledIngredients(newIngredients);
+    setScaledExtra(newExtra);
+
+    // Scale steps
+    const immediateSteps = recipe.steps.map((step) => {
+      const { scaled } = scaleText(step.instruction, multiplier);
+      return { ...step, instruction: scaled };
+    });
+    setScaledSteps(immediateSteps);
+
+    // For any step with ambiguous quantities, queue an AI call
+    const pending = new Set<number>();
+    recipe.steps.forEach((step, idx) => {
+      const { hasAmbiguous } = scaleText(step.instruction, multiplier);
+      if (hasAmbiguous && multiplier !== 1) pending.add(idx);
+    });
+
+    if (pending.size === 0) {
+      setAiPending(new Set());
+      return;
+    }
+
+    setAiPending(new Set(pending));
+
+    // Fire AI calls in parallel; update each step as its result arrives
+    pending.forEach((idx) => {
+      const originalInstruction = recipe.steps[idx].instruction;
+      aiScaleText(originalInstruction, multiplier).then((aiResult) => {
+        setScaledSteps((prev) => {
+          const next = [...prev];
+          next[idx] = { ...next[idx], instruction: aiResult };
+          return next;
+        });
+        setAiPending((prev) => {
+          const next = new Set(prev);
+          next.delete(idx);
+          return next;
+        });
+      });
+    });
+  }, [recipe, multiplier]);
+
+  // Seed scaled state when recipe first loads
+  useEffect(() => {
+    if (!recipe) return;
+    setScaledIngredients(recipe.ingredients_used.map((ing) => scaleText(ing, 1).scaled));
+    setScaledExtra((recipe.extra_ingredients_needed ?? []).map((ing) => scaleText(ing, 1).scaled));
+    setScaledSteps(recipe.steps.map((s) => ({ ...s })));
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [recipe?.id]);
 
   // Fetch recipe by UUID
   useEffect(() => {
@@ -85,7 +298,8 @@ export default function RecipePage({ params }: { params: { id: string } }) {
     ).catch(() => {});
   }, [params.id]);
 
-  const steps: RecipeStep[] = recipe?.steps ?? [];
+  // Use scaled versions for display; fall back to originals while scaling
+  const steps: RecipeStep[] = scaledSteps.length > 0 ? scaledSteps : (recipe?.steps ?? []);
   const stepCount = steps.length;
   const currentInstruction = steps[currentStep]?.instruction ?? "";
 
@@ -197,7 +411,6 @@ export default function RecipePage({ params }: { params: { id: string } }) {
 
   const progress = cookMode ? ((currentStep + 1) / stepCount) * 100 : 0;
   const isLastStep = currentStep === stepCount - 1;
-
   const showOfflineBanner = isOffline || servedFromCache;
 
   return (
@@ -241,6 +454,29 @@ export default function RecipePage({ params }: { params: { id: string } }) {
             <p style={s.heroDesc}>{recipe.description}</p>
           )}
 
+          {/* ── Serving multiplier control ── */}
+          <div style={s.multiplierRow}>
+            <span style={s.multiplierLabel}>Servings:</span>
+            {MULTIPLIERS.map((m) => (
+              <button
+                key={m}
+                style={{
+                  ...s.multiplierBtn,
+                  ...(multiplier === m ? s.multiplierBtnActive : {}),
+                }}
+                onClick={() => setMultiplier(m)}
+                aria-pressed={multiplier === m}
+              >
+                {m === 0.5 ? "½×" : `${m}×`}
+              </button>
+            ))}
+            {multiplier !== 1 && (
+              <span style={s.multiplierNote}>
+                {multiplier < 1 ? "Halved" : `${multiplier}× recipe`}
+              </span>
+            )}
+          </div>
+
           <div style={s.heroActions}>
             {!cookMode ? (
               <button style={s.ctaBtn} onClick={handleStartCooking}>
@@ -276,18 +512,18 @@ export default function RecipePage({ params }: { params: { id: string } }) {
       <div style={s.section}>
         <h2 style={s.sectionTitle}>Ingredients</h2>
         <ul style={s.ingList}>
-          {recipe.ingredients_used.map((ing, i) => (
+          {scaledIngredients.map((ing, i) => (
             <li key={i} style={s.ingItem}>
               <span style={s.ingDot} />
               {ing}
             </li>
           ))}
         </ul>
-        {(recipe.extra_ingredients_needed?.length ?? 0) > 0 && (
+        {scaledExtra.length > 0 && (
           <div style={s.extraBlock}>
             <p style={s.extraLabel}>You may also need:</p>
             <ul style={s.ingList}>
-              {recipe.extra_ingredients_needed.map((ing, i) => (
+              {scaledExtra.map((ing, i) => (
                 <li key={i} style={{ ...s.ingItem, color: "#666" }}>
                   <span style={{ ...s.ingDot, background: "#444" }} />
                   {ing}
@@ -379,7 +615,12 @@ export default function RecipePage({ params }: { params: { id: string } }) {
             {steps.map((step, i) => (
               <li key={step.step_number} style={s.stepListItem}>
                 <div style={s.stepListNum}>{step.step_number}</div>
-                <p style={s.stepListText}>{step.instruction}</p>
+                <p style={s.stepListText}>
+                  {step.instruction}
+                  {aiPending.has(i) && (
+                    <span style={s.aiScalingBadge}>✦ scaling…</span>
+                  )}
+                </p>
               </li>
             ))}
           </ol>
@@ -815,6 +1056,51 @@ const s: Record<string, React.CSSProperties> = {
     letterSpacing: 0.2,
     width: "100%",
     boxSizing: "border-box" as const,
+  },
+
+  // ── Multiplier control ────────────────────────────────
+  multiplierRow: {
+    display: "flex",
+    alignItems: "center",
+    gap: 8,
+    flexWrap: "wrap" as const,
+  },
+  multiplierLabel: {
+    color: "#888",
+    fontSize: 13,
+    fontWeight: 600,
+    marginRight: 2,
+  },
+  multiplierBtn: {
+    background: "#1a1a1a",
+    color: "#888",
+    border: "1px solid #2a2a2a",
+    borderRadius: 10,
+    padding: "6px 14px",
+    fontSize: 13,
+    fontWeight: 700,
+    cursor: "pointer",
+    transition: "all 0.15s",
+  },
+  multiplierBtnActive: {
+    background: "#2a1400",
+    color: "#FF6B35",
+    border: "1px solid #FF6B3566",
+  },
+  multiplierNote: {
+    color: "#FF6B35",
+    fontSize: 12,
+    fontWeight: 700,
+    marginLeft: 4,
+    opacity: 0.85,
+  },
+  aiScalingBadge: {
+    marginLeft: 8,
+    color: "#555",
+    fontSize: 11,
+    fontWeight: 600,
+    fontStyle: "italic" as const,
+    verticalAlign: "middle",
   },
 
   // ── Footer ────────────────────────────────────────────
