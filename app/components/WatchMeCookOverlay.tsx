@@ -20,9 +20,16 @@ export default function WatchMeCookOverlay({
   const [cameraReady, setCameraReady] = useState(false);
   const [cameraError, setCameraError] = useState("");
   const [checking, setChecking] = useState(false);
-  const [checkResult, setCheckResult] = useState<string | null>(null);
-  const [checkError, setCheckError] = useState("");
+  const [commentaryLog, setCommentaryLog] = useState<{ text: string; ts: number; isError?: boolean }[]>([]);
   const [autoStopToast, setAutoStopToast] = useState(false);
+  const [livePulse, setLivePulse] = useState(true);
+  const commentaryEndRef = useRef<HTMLDivElement>(null);
+
+  // Pulse the LIVE badge
+  useEffect(() => {
+    const id = setInterval(() => setLivePulse((p) => !p), 800);
+    return () => clearInterval(id);
+  }, []);
 
   // Start camera on mount
   useEffect(() => {
@@ -42,7 +49,7 @@ export default function WatchMeCookOverlay({
         setCameraReady(true);
       })
       .catch(() => {
-        if (active) setCameraError("Camera unavailable");
+        if (active) setCameraError("Camera unavailable — allow camera access and reload.");
       });
 
     return () => {
@@ -58,31 +65,32 @@ export default function WatchMeCookOverlay({
     return () => clearInterval(id);
   }, []);
 
+  // Auto-scroll commentary to bottom
+  useEffect(() => {
+    commentaryEndRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [commentaryLog]);
+
   const formatTime = (s: number) => {
-    const m = Math.floor(s / 60)
-      .toString()
-      .padStart(2, "0");
+    const m = Math.floor(s / 60).toString().padStart(2, "0");
     const sec = (s % 60).toString().padStart(2, "0");
     return `${m}:${sec}`;
   };
 
+  const addCommentary = useCallback((text: string, isError = false) => {
+    setCommentaryLog((prev) => [...prev.slice(-19), { text, ts: Date.now(), isError }]);
+  }, []);
+
   /**
    * Captures a frame, asks the AI, updates state, and returns
    * { hasChange, text } so callers can decide whether / how to speak.
-   *
-   * @param silent  When true the result is shown in the UI but NOT spoken
-   *                (the auto-loop handles speaking itself so it can await it).
    */
   const checkPan = useCallback(
     async (silent = false): Promise<{ hasChange: boolean; text: string }> => {
       if (!videoRef.current || !canvasRef.current || checking)
         return { hasChange: false, text: "" };
       setChecking(true);
-      setCheckResult(null);
-      setCheckError("");
 
       try {
-        // Capture current video frame
         const video = videoRef.current;
         const canvas = canvasRef.current;
         canvas.width = video.videoWidth || 640;
@@ -91,23 +99,17 @@ export default function WatchMeCookOverlay({
         if (!ctx) throw new Error("Canvas unavailable");
         ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
 
-        // Convert to blob
         const blob = await new Promise<Blob | null>((resolve) =>
           canvas.toBlob(resolve, "image/jpeg", 0.85)
         );
         if (!blob) throw new Error("Could not capture frame");
 
-        // Upload frame
         const formData = new FormData();
         formData.append("file", blob, "pan-check.jpg");
-        const uploadRes = await fetch("/api/upload", {
-          method: "POST",
-          body: formData,
-        });
+        const uploadRes = await fetch("/api/upload", { method: "POST", body: formData });
         if (!uploadRes.ok) throw new Error("Upload failed");
         const { url } = await uploadRes.json();
 
-        // Ask AI to evaluate what's in the pan
         const contextText = stepInstruction
           ? `The cook is currently on this step: "${stepInstruction}". `
           : "";
@@ -117,21 +119,16 @@ export default function WatchMeCookOverlay({
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
             system:
-              "You are a helpful cooking assistant watching someone cook. When shown a photo of food cooking in a pan or pot, give a short (1–2 sentence) practical observation: describe what you see and whether it looks on track, needs attention, or is done. If nothing notable has changed and everything looks fine, reply with exactly the word NOCHANGE and nothing else. Be encouraging but honest. No markdown.",
+              "You are a helpful cooking assistant watching someone cook via their phone camera. Give a short (1–2 sentence) practical observation about what you see and whether it looks on track, needs attention, or is done. If nothing notable has changed and everything looks fine, reply with exactly the word NOCHANGE and nothing else. Be encouraging but honest. No markdown.",
             messages: [
               {
                 role: "user",
                 content: [
                   {
                     type: "text",
-                    text:
-                      contextText +
-                      "Please check my pan and tell me how it looks.",
+                    text: contextText + "Please check what I'm cooking and tell me how it looks.",
                   },
-                  {
-                    type: "image_url",
-                    image_url: { url },
-                  },
+                  { type: "image_url", image_url: { url } },
                 ],
               },
             ],
@@ -140,12 +137,10 @@ export default function WatchMeCookOverlay({
         if (!aiRes.ok) throw new Error("AI check failed");
         const { text } = await aiRes.json();
 
-        // NOCHANGE means the auto-loop should stay quiet
         const hasChange = text.trim().toUpperCase() !== "NOCHANGE";
 
         if (hasChange) {
-          setCheckResult(text);
-          // Manual taps speak immediately; the auto-loop awaits speakText itself
+          addCommentary(text);
           if (!silent && "speechSynthesis" in window) {
             window.speechSynthesis.cancel();
             const utt = new SpeechSynthesisUtterance(text);
@@ -157,15 +152,14 @@ export default function WatchMeCookOverlay({
 
         return { hasChange, text };
       } catch (err: unknown) {
-        setCheckError(
-          err instanceof Error ? err.message : "Something went wrong"
-        );
+        const msg = err instanceof Error ? err.message : "Something went wrong";
+        addCommentary(msg, true);
         return { hasChange: false, text: "" };
       } finally {
         setChecking(false);
       }
     },
-    [checking, stepInstruction]
+    [checking, stepInstruction, addCommentary]
   );
 
   // ── 20-minute auto-stop ───────────────────────────────────────────────
@@ -173,34 +167,23 @@ export default function WatchMeCookOverlay({
     if (elapsedSeconds < 1200) return;
     window.speechSynthesis?.cancel();
     setAutoStopToast(true);
-    const id = setTimeout(() => {
-      onStop();
-    }, 3000);
+    const id = setTimeout(() => { onStop(); }, 3000);
     return () => clearTimeout(id);
   }, [elapsedSeconds, onStop]);
 
   // ── 60-second auto-check loop ─────────────────────────────────────────
-  // Uses setTimeout (not setInterval) so the 60 s window starts AFTER any
-  // speech has finished, preventing overlapping announcements.
   useEffect(() => {
-    if (!cameraReady) return; // don't start until camera is up
-
+    if (!cameraReady) return;
     let cancelled = false;
     let timeoutId: ReturnType<typeof setTimeout>;
 
     const loop = () => {
       timeoutId = setTimeout(async () => {
         if (cancelled) return;
-
-        // silent=true so checkPan does not call speechSynthesis itself
         const { hasChange, text } = await checkPan(true);
-
-        // Only speak (and await completion) when something changed
         if (!cancelled && hasChange && text) {
-          await speakText(text).catch(() => {/* ignore speech errors */});
+          await speakText(text).catch(() => { /* ignore */ });
         }
-
-        // Schedule the next check only after speech (or the silent check) ends
         if (!cancelled) loop();
       }, 60_000);
     };
@@ -211,254 +194,333 @@ export default function WatchMeCookOverlay({
       clearTimeout(timeoutId);
       window.speechSynthesis?.cancel();
     };
-    // checkPan identity changes when `checking` flips, but we want the loop
-    // to use whatever checkPan is current at call-time, not at setup-time.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [cameraReady]);
 
   return (
-    <div style={overlayStyles.root}>
+    <div style={S.root}>
       {/* Hidden canvas for frame capture */}
       <canvas ref={canvasRef} style={{ display: "none" }} />
 
-      {/* Corner video preview */}
-      <div style={overlayStyles.videoCorner}>
+      {/* ── Full-screen camera feed ── */}
+      <div style={S.videoWrap}>
         {cameraReady ? (
           <video
             ref={videoRef}
-            style={overlayStyles.video}
+            style={S.video}
             autoPlay
             playsInline
             muted
           />
         ) : (
-          <div style={overlayStyles.videoPlaceholder}>
+          <div style={S.videoPlaceholder}>
             {cameraError ? (
-              <span style={{ fontSize: 11, color: "#FF6B6B", textAlign: "center", padding: 4 }}>
-                {cameraError}
-              </span>
+              <div style={S.cameraErrorBox}>
+                <span style={{ fontSize: 32 }}>📷</span>
+                <p style={{ color: "#FF6B6B", fontSize: 14, textAlign: "center", margin: "8px 0 0" }}>
+                  {cameraError}
+                </p>
+              </div>
             ) : (
-              <span style={{ fontSize: 18 }}>📷</span>
+              <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 12 }}>
+                <span style={{ fontSize: 40 }}>📷</span>
+                <p style={{ color: "#888", fontSize: 14, margin: 0 }}>Starting camera…</p>
+              </div>
             )}
           </div>
         )}
 
-        {/* Elapsed time badge over video corner */}
-        <div style={overlayStyles.timerBadge}>{formatTime(elapsedSeconds)}</div>
+        {/* Top bar — LIVE badge + timer + stop */}
+        <div style={S.topBar}>
+          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            <div style={{ ...S.liveDot, opacity: livePulse ? 1 : 0.3 }} />
+            <span style={S.liveLabel}>LIVE</span>
+          </div>
+          <span style={S.timer}>{formatTime(elapsedSeconds)}</span>
+          <button style={S.stopBtnTop} onClick={onStop}>⏹ Stop</button>
+        </div>
+
+        {/* Current step pill */}
+        {stepInstruction && (
+          <div style={S.stepPill}>
+            <span style={S.stepPillEmoji}>👨‍🍳</span>
+            <span style={S.stepPillText} title={stepInstruction}>
+              {stepInstruction.length > 70
+                ? stepInstruction.slice(0, 67) + "…"
+                : stepInstruction}
+            </span>
+          </div>
+        )}
       </div>
 
-      {/* Action bar at the bottom */}
-      <div style={overlayStyles.actionBar}>
-        {/* Check My Pan button */}
-        <button
-          style={{
-            ...overlayStyles.checkBtn,
-            opacity: checking || !cameraReady ? 0.55 : 1,
-          }}
-          onClick={() => checkPan()}
-          disabled={checking || !cameraReady}
-        >
-          {checking ? (
-            <>
-              <span style={overlayStyles.spinner} />
-              Checking…
-            </>
-          ) : (
-            <>🍳 Check My Pan</>
-          )}
-        </button>
+      {/* ── Commentary panel ── */}
+      <div style={S.panel}>
+        {/* Panel header */}
+        <div style={S.panelHeader}>
+          <span style={S.panelTitle}>🤖 AI Commentary</span>
+          <button
+            style={{ ...S.checkBtn, opacity: checking || !cameraReady ? 0.5 : 1 }}
+            onClick={() => checkPan()}
+            disabled={checking || !cameraReady}
+          >
+            {checking ? (
+              <><span style={S.spinner} /> Checking…</>
+            ) : (
+              <>🍳 Check now</>
+            )}
+          </button>
+        </div>
 
-        {/* Stop button */}
-        <button style={overlayStyles.stopBtn} onClick={onStop}>
-          ⏹ Stop
-        </button>
+        {/* Commentary log */}
+        <div style={S.log}>
+          {commentaryLog.length === 0 ? (
+            <div style={S.emptyLog}>
+              <span style={{ fontSize: 28 }}>👁️</span>
+              <p style={{ color: "#555", fontSize: 13, margin: "8px 0 0", textAlign: "center" }}>
+                AI will check your cooking every 60 seconds.{"\n"}Tap "Check now" any time.
+              </p>
+            </div>
+          ) : (
+            commentaryLog.map((entry) => (
+              <div key={entry.ts} style={{ ...S.logEntry, borderLeftColor: entry.isError ? "#FF6B6B" : "#FF6B35" }}>
+                <span style={{ ...S.logText, color: entry.isError ? "#FF6B6B" : "#e8e8e8" }}>
+                  {entry.isError ? "⚠ " : ""}
+                  {entry.text}
+                </span>
+                <span style={S.logTime}>
+                  {new Date(entry.ts).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" })}
+                </span>
+              </div>
+            ))
+          )}
+          <div ref={commentaryEndRef} />
+        </div>
       </div>
 
       {/* Auto-stop toast */}
       {autoStopToast && (
-        <div
-          style={{
-            pointerEvents: "none",
-            position: "absolute",
-            top: 24,
-            left: 16,
-            right: 16,
-            background: "rgba(20,20,20,0.97)",
-            border: "1px solid rgba(255,107,53,0.5)",
-            borderRadius: 14,
-            padding: "14px 18px",
-            color: "#fff",
-            fontSize: 15,
-            fontWeight: 600,
-            textAlign: "center",
-            boxShadow: "0 4px 24px rgba(0,0,0,0.6)",
-            zIndex: 300,
-          }}
-        >
+        <div style={S.toast}>
           ⏱ 20 minutes reached — stopping session…
-        </div>
-      )}
-
-      {/* AI feedback bubble */}
-      {(checkResult || checkError) && (
-        <div
-          style={{
-            ...overlayStyles.feedbackBubble,
-            borderColor: checkError ? "#FF6B6B44" : "#FF6B3544",
-          }}
-        >
-          {checkError ? (
-            <span style={{ color: "#FF6B6B", fontSize: 13 }}>⚠ {checkError}</span>
-          ) : (
-            <span style={{ color: "#fff", fontSize: 14, lineHeight: 1.5 }}>
-              {checkResult}
-            </span>
-          )}
-          <button
-            style={overlayStyles.dismissBtn}
-            onClick={() => {
-              setCheckResult(null);
-              setCheckError("");
-            }}
-            aria-label="Dismiss"
-          >
-            ✕
-          </button>
         </div>
       )}
     </div>
   );
 }
 
-const overlayStyles: Record<string, React.CSSProperties> = {
+const S: Record<string, React.CSSProperties> = {
   root: {
     position: "fixed",
     inset: 0,
     zIndex: 200,
-    pointerEvents: "none", // let taps pass through the transparent middle
+    background: "#000",
     display: "flex",
     flexDirection: "column",
-    justifyContent: "space-between",
-    alignItems: "flex-end",
+    overflow: "hidden",
   },
 
-  // ── Corner video ──────────────────────────────────────────────────────
-  videoCorner: {
-    pointerEvents: "auto",
+  // ── Camera ────────────────────────────────────────────────────────────
+  videoWrap: {
     position: "relative",
-    width: 120,
-    height: 90,
-    margin: "16px 16px 0 0",
-    borderRadius: 12,
+    flex: "0 0 55dvh",
+    minHeight: 220,
+    background: "#0a0a0a",
     overflow: "hidden",
-    border: "2px solid rgba(255,255,255,0.18)",
-    background: "#111",
-    boxShadow: "0 4px 20px rgba(0,0,0,0.6)",
-    flexShrink: 0,
   },
   video: {
+    position: "absolute",
+    inset: 0,
     width: "100%",
     height: "100%",
     objectFit: "cover",
     display: "block",
   },
   videoPlaceholder: {
-    width: "100%",
-    height: "100%",
+    position: "absolute",
+    inset: 0,
     display: "flex",
     alignItems: "center",
     justifyContent: "center",
-    background: "#1a1a1a",
+    background: "#0f0f0f",
   },
-  timerBadge: {
-    position: "absolute",
-    bottom: 4,
-    left: 0,
-    right: 0,
-    textAlign: "center",
-    fontSize: 11,
-    fontWeight: 700,
-    color: "#fff",
-    background: "rgba(0,0,0,0.55)",
-    letterSpacing: 0.5,
-    paddingBottom: 2,
+  cameraErrorBox: {
+    display: "flex",
+    flexDirection: "column",
+    alignItems: "center",
+    padding: "0 32px",
   },
 
-  // ── Action bar ────────────────────────────────────────────────────────
-  actionBar: {
-    pointerEvents: "auto",
-    width: "100%",
+  // ── Top bar ───────────────────────────────────────────────────────────
+  topBar: {
+    position: "absolute",
+    top: 0,
+    left: 0,
+    right: 0,
     display: "flex",
-    gap: 10,
-    padding: "12px 16px 32px",
-    background: "linear-gradient(to top, rgba(0,0,0,0.85) 70%, transparent)",
     alignItems: "center",
-    justifyContent: "center",
+    justifyContent: "space-between",
+    padding: "12px 16px",
+    background: "linear-gradient(to bottom, rgba(0,0,0,0.7) 0%, transparent 100%)",
+  },
+  liveDot: {
+    width: 8,
+    height: 8,
+    borderRadius: "50%",
+    background: "#FF3B30",
+    flexShrink: 0,
+    transition: "opacity 0.3s",
+  },
+  liveLabel: {
+    color: "#fff",
+    fontSize: 12,
+    fontWeight: 800,
+    letterSpacing: 1.5,
+  },
+  timer: {
+    color: "#fff",
+    fontSize: 14,
+    fontWeight: 700,
+    fontVariantNumeric: "tabular-nums",
+    background: "rgba(0,0,0,0.45)",
+    borderRadius: 8,
+    padding: "3px 8px",
+  },
+  stopBtnTop: {
+    background: "rgba(255,59,48,0.85)",
+    color: "#fff",
+    border: "none",
+    borderRadius: 10,
+    padding: "8px 14px",
+    fontSize: 13,
+    fontWeight: 700,
+    cursor: "pointer",
+    backdropFilter: "blur(4px)",
+  },
+
+  // ── Step pill ─────────────────────────────────────────────────────────
+  stepPill: {
+    position: "absolute",
+    bottom: 12,
+    left: 12,
+    right: 12,
+    background: "rgba(0,0,0,0.72)",
+    backdropFilter: "blur(8px)",
+    borderRadius: 12,
+    padding: "10px 14px",
+    display: "flex",
+    alignItems: "flex-start",
+    gap: 8,
+    border: "1px solid rgba(255,255,255,0.1)",
+  },
+  stepPillEmoji: {
+    fontSize: 16,
+    flexShrink: 0,
+    marginTop: 1,
+  },
+  stepPillText: {
+    color: "#fff",
+    fontSize: 13,
+    lineHeight: 1.45,
+    fontWeight: 500,
+  },
+
+  // ── Commentary panel ──────────────────────────────────────────────────
+  panel: {
+    flex: 1,
+    display: "flex",
+    flexDirection: "column",
+    background: "#111",
+    overflow: "hidden",
+    borderTop: "1px solid #222",
+  },
+  panelHeader: {
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "space-between",
+    padding: "12px 16px",
+    borderBottom: "1px solid #1e1e1e",
+    background: "#141414",
+    flexShrink: 0,
+  },
+  panelTitle: {
+    color: "#fff",
+    fontSize: 15,
+    fontWeight: 700,
   },
   checkBtn: {
-    flex: 1,
-    maxWidth: 220,
     display: "flex",
     alignItems: "center",
-    justifyContent: "center",
-    gap: 8,
+    gap: 6,
     background: "#FF6B35",
     color: "#fff",
     border: "none",
-    borderRadius: 16,
-    padding: "16px 20px",
-    fontSize: 16,
+    borderRadius: 12,
+    padding: "10px 16px",
+    fontSize: 14,
     fontWeight: 700,
     cursor: "pointer",
-    letterSpacing: 0.3,
   },
-  stopBtn: {
+  log: {
+    flex: 1,
+    overflowY: "auto",
+    padding: "12px 16px 24px",
+    display: "flex",
+    flexDirection: "column",
+    gap: 10,
+  },
+  emptyLog: {
+    flex: 1,
+    display: "flex",
+    flexDirection: "column",
+    alignItems: "center",
+    justifyContent: "center",
+    padding: "24px 0",
+  },
+  logEntry: {
     background: "#1a1a1a",
-    color: "#fff",
-    border: "1px solid #333",
-    borderRadius: 16,
-    padding: "16px 20px",
-    fontSize: 16,
-    fontWeight: 700,
-    cursor: "pointer",
-    whiteSpace: "nowrap",
+    borderRadius: 12,
+    borderLeft: "3px solid #FF6B35",
+    padding: "10px 12px",
+    display: "flex",
+    flexDirection: "column",
+    gap: 4,
+  },
+  logText: {
+    fontSize: 14,
+    lineHeight: 1.5,
+  },
+  logTime: {
+    color: "#555",
+    fontSize: 11,
+    fontVariantNumeric: "tabular-nums",
   },
 
-  // ── Spinner (inline) ──────────────────────────────────────────────────
+  // ── Spinner ───────────────────────────────────────────────────────────
   spinner: {
     display: "inline-block",
-    width: 14,
-    height: 14,
+    width: 12,
+    height: 12,
     border: "2px solid rgba(255,255,255,0.3)",
     borderTop: "2px solid #fff",
     borderRadius: "50%",
     animation: "spin 0.8s linear infinite",
   },
 
-  // ── Feedback bubble ───────────────────────────────────────────────────
-  feedbackBubble: {
-    pointerEvents: "auto",
+  // ── Toast ─────────────────────────────────────────────────────────────
+  toast: {
     position: "absolute",
-    bottom: 100,
+    top: 70,
     left: 16,
     right: 16,
-    background: "rgba(20,20,20,0.96)",
-    border: "1px solid",
-    borderRadius: 16,
-    padding: "14px 40px 14px 16px",
-    boxShadow: "0 4px 24px rgba(0,0,0,0.5)",
-    display: "flex",
-    alignItems: "flex-start",
-  },
-  dismissBtn: {
-    position: "absolute",
-    top: 10,
-    right: 10,
-    background: "transparent",
-    border: "none",
-    color: "#666",
-    fontSize: 14,
-    cursor: "pointer",
-    lineHeight: 1,
+    background: "rgba(20,20,20,0.97)",
+    border: "1px solid rgba(255,107,53,0.5)",
+    borderRadius: 14,
+    padding: "14px 18px",
+    color: "#fff",
+    fontSize: 15,
+    fontWeight: 600,
+    textAlign: "center",
+    boxShadow: "0 4px 24px rgba(0,0,0,0.6)",
+    zIndex: 300,
+    pointerEvents: "none",
   },
 };
