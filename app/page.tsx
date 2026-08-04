@@ -869,7 +869,8 @@ Steps should be clear, concise, kitchen-friendly instructions. Aim for 5-10 step
     );
   }
 
-  if (appState === "cooking" && activeRecipe !== null) {
+  if (appState === "cooking") {
+    if (!activeRecipe) return null;
     const steps = activeRecipe.steps;
     const current = steps[cookingStep];
     const isLast = cookingStep === steps.length - 1;
