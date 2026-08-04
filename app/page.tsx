@@ -63,6 +63,7 @@ export default function SousPage() {
   const [cameraError, setCameraError] = useState("");
   const [uploadedUrl, setUploadedUrl] = useState<string | null>(null);
   const [ingredients, setIngredients] = useState<string[]>([]);
+  const [confidenceMap, setConfidenceMap] = useState<Record<string, "high" | "medium" | "low">>({});
   const [pantryIngredients, setPantryIngredients] = useState<string[]>([]);
   const [newIngredient, setNewIngredient] = useState("");
   const [editingIndex, setEditingIndex] = useState<number | null>(null);
@@ -494,14 +495,14 @@ export default function SousPage() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           system:
-            "You are a kitchen assistant. When shown a photo of food or ingredients, respond with ONLY a JSON array of ingredient name strings — no explanation, no markdown, just the raw JSON array. Example: [\"eggs\",\"butter\",\"flour\"]",
+            "You are a kitchen assistant. When shown a photo of food or ingredients, respond with ONLY a JSON array of objects — no explanation, no markdown, just the raw JSON array. Each object must have exactly two fields: \"name\" (string) and \"confidence\" (\"high\", \"medium\", or \"low\"). Use \"high\" when you can clearly identify the item, \"medium\" when reasonably sure, and \"low\" when guessing or partially obscured. Example: [{\"name\":\"eggs\",\"confidence\":\"high\"},{\"name\":\"butter\",\"confidence\":\"medium\"},{\"name\":\"flour\",\"confidence\":\"low\"}]",
           messages: [
             {
               role: "user",
               content: [
                 {
                   type: "text",
-                  text: "List every ingredient or food item you can see in this photo.",
+                  text: "List every ingredient or food item you can see in this photo, with a confidence score for each.",
                 },
                 {
                   type: "image_url",
@@ -515,27 +516,54 @@ export default function SousPage() {
       if (!aiRes.ok) throw new Error("AI analysis failed");
       const { text } = await aiRes.json();
 
-      let detected: string[] = [];
+      let detectedRaw: { name: string; confidence: "high" | "medium" | "low" }[] = [];
       try {
-        // Strip markdown code fences if the model wrapped the JSON
         const cleaned = text.replace(/```[a-z]*\n?/gi, "").trim();
-        detected = JSON.parse(cleaned);
-        if (!Array.isArray(detected)) detected = [];
+        const parsed = JSON.parse(cleaned);
+        if (Array.isArray(parsed)) {
+          // Accept both new {name, confidence} format and legacy string format
+          detectedRaw = parsed.map((item: unknown) => {
+            if (typeof item === "string") return { name: item, confidence: "medium" as const };
+            if (item && typeof (item as any).name === "string") {
+              const c = (item as any).confidence;
+              return {
+                name: (item as any).name,
+                confidence: (c === "high" || c === "medium" || c === "low") ? c : "medium" as const,
+              };
+            }
+            return null;
+          }).filter((x): x is { name: string; confidence: "high" | "medium" | "low" } => x !== null);
+        }
       } catch {
-        // If parsing fails, try to extract quoted words as a fallback
-        detected = (text.match(/"([^"]+)"/g) || []).map((s: string) =>
-          s.replace(/"/g, "")
-        );
+        // Fallback: extract quoted strings and treat as medium confidence
+        const names = (text.match(/"([^"]+)"/g) || []).map((s: string) => s.replace(/"/g, ""));
+        detectedRaw = names.map((n: string) => ({ name: n, confidence: "medium" as const }));
       }
 
-      // Merge detected with pantry: pantry items come first, deduped
-      const detectedClean = detected.filter((i) => typeof i === "string" && i.trim());
+      const detectedClean = detectedRaw.filter((i) => i.name.trim());
+      const newConfidenceMap: Record<string, "high" | "medium" | "low"> = {};
+      detectedClean.forEach((i) => { newConfidenceMap[i.name.toLowerCase()] = i.confidence; });
+
+      // Pantry items are always treated as high confidence
+      pantryIngredients.forEach((p) => { newConfidenceMap[p.toLowerCase()] = "high"; });
+
       const pantrySet = new Set(pantryIngredients.map((p) => p.toLowerCase()));
+      const detectedNames = detectedClean.map((i) => i.name);
       const merged = [
         ...pantryIngredients,
-        ...detectedClean.filter((d) => !pantrySet.has(d.toLowerCase())),
+        ...detectedNames.filter((d) => !pantrySet.has(d.toLowerCase())),
       ];
-      setIngredients(merged.length > 0 ? merged : detectedClean);
+      const finalList = merged.length > 0 ? merged : detectedNames;
+      setConfidenceMap(newConfidenceMap);
+      setIngredients(finalList);
+      // Auto-open inline edit for low-confidence items so they're immediately obvious
+      const firstLowIdx = finalList.findIndex(
+        (name) => newConfidenceMap[name.toLowerCase()] === "low"
+      );
+      if (firstLowIdx !== -1) {
+        setEditingIndex(firstLowIdx);
+        setEditingValue(finalList[firstLowIdx]);
+      }
       setAppState("ingredients");
     } catch (err: unknown) {
       alert(err instanceof Error ? err.message : "Something went wrong. Please try again.");
@@ -951,7 +979,17 @@ Search your knowledge of real recipes from cookbooks and food websites. Give me 
   }, [capturedImage]);
 
   const removeIngredient = useCallback((index: number) => {
-    setIngredients((prev) => prev.filter((_, i) => i !== index));
+    setIngredients((prev) => {
+      const removed = prev[index];
+      if (removed) {
+        setConfidenceMap((cm) => {
+          const next = { ...cm };
+          delete next[removed.toLowerCase()];
+          return next;
+        });
+      }
+      return prev.filter((_, i) => i !== index);
+    });
   }, []);
 
   const startEditing = useCallback((index: number, value: string) => {
@@ -963,11 +1001,31 @@ Search your knowledge of real recipes from cookbooks and food websites. Give me 
     if (editingIndex === null) return;
     const trimmed = editingValue.trim();
     if (trimmed) {
-      setIngredients((prev) =>
-        prev.map((item, i) => (i === editingIndex ? trimmed : item))
-      );
+      setIngredients((prev) => {
+        const oldName = prev[editingIndex];
+        // Migrate confidence from old name to new name
+        setConfidenceMap((cm) => {
+          const next = { ...cm };
+          const oldConf = next[oldName?.toLowerCase() ?? ""] ?? "medium";
+          if (oldName) delete next[oldName.toLowerCase()];
+          // Edited items become "high" confidence — user confirmed them
+          next[trimmed.toLowerCase()] = "high";
+          return next;
+        });
+        return prev.map((item, i) => (i === editingIndex ? trimmed : item));
+      });
     } else {
-      setIngredients((prev) => prev.filter((_, i) => i !== editingIndex));
+      setIngredients((prev) => {
+        const removed = prev[editingIndex];
+        if (removed) {
+          setConfidenceMap((cm) => {
+            const next = { ...cm };
+            delete next[removed.toLowerCase()];
+            return next;
+          });
+        }
+        return prev.filter((_, i) => i !== editingIndex);
+      });
     }
     setEditingIndex(null);
     setEditingValue("");
@@ -977,6 +1035,8 @@ Search your knowledge of real recipes from cookbooks and food websites. Give me 
     const trimmed = newIngredient.trim();
     if (!trimmed) return;
     setIngredients((prev) => [...prev, trimmed]);
+    // Manually added items are high confidence
+    setConfidenceMap((prev) => ({ ...prev, [trimmed.toLowerCase()]: "high" }));
     setNewIngredient("");
   }, [newIngredient]);
 
@@ -1391,47 +1451,75 @@ Search your knowledge of real recipes from cookbooks and food websites. Give me 
           )}
 
           <ul style={styles.ingredientList}>
-            {ingredients.map((item, i) => (
-              <li key={i} style={{
-                ...styles.ingredientItem,
-                ...(pantryIngredients.some((p) => p.toLowerCase() === item.toLowerCase())
-                  ? styles.ingredientItemPantry : {}),
-              }}>
-                {editingIndex === i ? (
-                  <input
-                    style={styles.inlineInput}
-                    value={editingValue}
-                    autoFocus
-                    onChange={(e) => setEditingValue(e.target.value)}
-                    onBlur={commitEdit}
-                    onKeyDown={(e) => {
-                      if (e.key === "Enter") commitEdit();
-                      if (e.key === "Escape") {
-                        setEditingIndex(null);
-                        setEditingValue("");
-                      }
-                    }}
-                  />
-                ) : (
-                  <span
-                    style={styles.ingredientLabel}
-                    onClick={() => startEditing(i, item)}
-                  >
-                    {item}
-                    {pantryIngredients.some((p) => p.toLowerCase() === item.toLowerCase()) && (
-                      <span style={styles.pantryPip}>🥫</span>
+            {ingredients.map((item, i) => {
+              const conf = confidenceMap[item.toLowerCase()] ?? "medium";
+              const isPantry = pantryIngredients.some((p) => p.toLowerCase() === item.toLowerCase());
+              const isLow = conf === "low" && !isPantry;
+              return (
+                <li key={i} style={{
+                  ...styles.ingredientItem,
+                  ...(isPantry ? styles.ingredientItemPantry : {}),
+                  ...(isLow ? styles.ingredientItemLow : {}),
+                }}>
+                  <div style={styles.ingredientMain}>
+                    {editingIndex === i ? (
+                      <input
+                        style={{
+                          ...styles.inlineInput,
+                          ...(isLow ? styles.inlineInputLow : {}),
+                        }}
+                        value={editingValue}
+                        autoFocus
+                        onChange={(e) => setEditingValue(e.target.value)}
+                        onBlur={commitEdit}
+                        onKeyDown={(e) => {
+                          if (e.key === "Enter") commitEdit();
+                          if (e.key === "Escape") {
+                            setEditingIndex(null);
+                            setEditingValue("");
+                          }
+                        }}
+                      />
+                    ) : (
+                      <span
+                        style={{
+                          ...styles.ingredientLabel,
+                          ...(isLow ? styles.ingredientLabelLow : {}),
+                        }}
+                        onClick={() => startEditing(i, item)}
+                      >
+                        {item}
+                        {isPantry && <span style={styles.pantryPip}>🥫</span>}
+                      </span>
                     )}
-                  </span>
-                )}
-                <button
-                  style={styles.removeBtn}
-                  onClick={() => removeIngredient(i)}
-                  aria-label={`Remove ${item}`}
-                >
-                  ✕
-                </button>
-              </li>
-            ))}
+                    <div style={styles.ingredientBadgeRow}>
+                      {!isPantry && (
+                        <span style={{
+                          ...styles.confidenceBadge,
+                          ...(conf === "high" ? styles.confidenceBadgeHigh
+                            : conf === "medium" ? styles.confidenceBadgeMedium
+                            : styles.confidenceBadgeLow),
+                        }}>
+                          {conf === "high" ? "✓ high" : conf === "medium" ? "~ medium" : "? low"}
+                        </span>
+                      )}
+                      {isLow && editingIndex !== i && (
+                        <span style={styles.lowWarning} onClick={() => startEditing(i, item)}>
+                          ⚠ Tap to correct
+                        </span>
+                      )}
+                    </div>
+                  </div>
+                  <button
+                    style={styles.removeBtn}
+                    onClick={() => removeIngredient(i)}
+                    aria-label={`Remove ${item}`}
+                  >
+                    ✕
+                  </button>
+                </li>
+              );
+            })}
           </ul>
 
           {/* Add missing ingredient */}
@@ -2457,12 +2545,63 @@ const styles: Record<string, React.CSSProperties> = {
     padding: "10px 12px",
     gap: 8,
   },
+  ingredientItemLow: {
+    background: "#1f1208",
+    border: "1px solid #f59e0b55",
+  },
+  ingredientMain: {
+    flex: 1,
+    display: "flex",
+    flexDirection: "column" as const,
+    gap: 4,
+    minWidth: 0,
+  },
+  ingredientBadgeRow: {
+    display: "flex",
+    alignItems: "center",
+    gap: 6,
+    flexWrap: "wrap" as const,
+  },
+  confidenceBadge: {
+    display: "inline-block",
+    borderRadius: 20,
+    padding: "2px 8px",
+    fontSize: 11,
+    fontWeight: 700,
+    letterSpacing: 0.2,
+    textTransform: "uppercase" as const,
+  },
+  confidenceBadgeHigh: {
+    background: "#052e16",
+    color: "#4ade80",
+    border: "1px solid #22c55e44",
+  },
+  confidenceBadgeMedium: {
+    background: "#1e1b4b",
+    color: "#a5b4fc",
+    border: "1px solid #6366f144",
+  },
+  confidenceBadgeLow: {
+    background: "#2d1200",
+    color: "#fb923c",
+    border: "1px solid #f59e0b66",
+  },
+  lowWarning: {
+    color: "#f59e0b",
+    fontSize: 11,
+    fontWeight: 700,
+    cursor: "pointer",
+    letterSpacing: 0.1,
+  },
   ingredientLabel: {
     flex: 1,
     color: "#fff",
     fontSize: 16,
     cursor: "pointer",
     padding: "2px 0",
+  },
+  ingredientLabelLow: {
+    color: "#fbbf24",
   },
   inlineInput: {
     flex: 1,
@@ -2473,6 +2612,10 @@ const styles: Record<string, React.CSSProperties> = {
     fontSize: 16,
     outline: "none",
     padding: "2px 4px",
+  },
+  inlineInputLow: {
+    borderBottom: "1px solid #f59e0b",
+    color: "#fbbf24",
   },
   removeBtn: {
     background: "transparent",
