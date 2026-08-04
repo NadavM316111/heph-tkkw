@@ -309,6 +309,20 @@ export default function SousPage() {
     }
   }, [capturedBlob, capturedSource, user]);
 
+  const speakText = useCallback((text: string, onDone?: () => void) => {
+    if (!("speechSynthesis" in window)) {
+      onDone?.();
+      return;
+    }
+    window.speechSynthesis.cancel();
+    const utt = new SpeechSynthesisUtterance(text);
+    utt.rate = 0.95;
+    utt.pitch = 1;
+    utt.lang = "en-US";
+    utt.onend = () => onDone?.();
+    window.speechSynthesis.speak(utt);
+  }, []);
+
   const startListening = useCallback(() => {
     const SpeechRecognition =
       (window as any).webkitSpeechRecognition || (window as any).SpeechRecognition;
@@ -323,6 +337,7 @@ export default function SousPage() {
 
     recognition.onresult = (event: any) => {
       const transcript: string = event.results[0][0].transcript.toLowerCase().trim();
+
       if (transcript.includes("next") || transcript.includes("continue") || transcript.includes("ok") || transcript.includes("go")) {
         setListeningForNext(false);
         recognitionRef.current = null;
@@ -330,8 +345,56 @@ export default function SousPage() {
           if (activeRecipe && prev < activeRecipe.steps.length - 1) return prev + 1;
           return prev;
         });
+
+      } else if (transcript.includes("repeat") || transcript.includes("again")) {
+        // Re-read the current step by stopping synth then restarting the effect
+        setListeningForNext(false);
+        recognitionRef.current = null;
+        window.speechSynthesis.cancel();
+        // Trigger the cooking effect again by momentarily flipping a signal —
+        // we do this by reading the current step instruction directly and speaking it.
+        setCookingStep((prev) => {
+          // speak after state settles
+          setTimeout(() => {
+            if (activeRecipe) {
+              const current = activeRecipe.steps[prev];
+              const prefix = prev === activeRecipe.steps.length - 1
+                ? "Final step. "
+                : `Step ${current.step_number} of ${activeRecipe.steps.length}. `;
+              speakText(prefix + current.instruction, () => {
+                if (!synthStopRef.current) startListening();
+              });
+            }
+          }, 100);
+          return prev;
+        });
+
+      } else if (transcript.includes("back") || transcript.includes("previous")) {
+        setListeningForNext(false);
+        recognitionRef.current = null;
+        synthStopRef.current = true;
+        window.speechSynthesis.cancel();
+        synthStopRef.current = false;
+        setCookingStep((prev) => Math.max(0, prev - 1));
+
+      } else if (transcript.includes("ingredient")) {
+        setListeningForNext(false);
+        recognitionRef.current = null;
+        window.speechSynthesis.cancel();
+        if (activeRecipe) {
+          const used = activeRecipe.ingredients_used ?? [];
+          const extra = activeRecipe.extra_ingredients_needed ?? [];
+          const all = [...used, ...extra];
+          const text = all.length > 0
+            ? "Ingredients: " + all.join(", ") + "."
+            : "No ingredient list available.";
+          speakText(text, () => {
+            if (!synthStopRef.current) startListening();
+          });
+        }
+
       } else {
-        // Didn't hear the right word — listen again
+        // Didn't hear a recognised command — listen again
         recognition.stop();
         recognitionRef.current = null;
         setTimeout(() => { if (!synthStopRef.current) startListening(); }, 400);
@@ -356,7 +419,7 @@ export default function SousPage() {
 
     recognition.start();
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeRecipe]);
+  }, [activeRecipe, speakText]);
 
   const advanceCookingStep = useCallback(() => {
     if (!activeRecipe) return;
@@ -917,16 +980,36 @@ Search your knowledge of real recipes from cookbooks and food websites. Give me 
           {listeningForNext && (
             <div style={styles.listeningBadge}>
               <span style={styles.listeningDot} />
-              Listening… say <strong>&ldquo;next&rdquo;</strong>
+              Listening…
             </div>
           )}
 
           {!listeningForNext && (
             <p style={styles.speechHint}>
               {speechSupported
-                ? `Say "next" to advance, or tap the button below`
+                ? `Tap the button below, or use a voice command`
                 : "Tap the button below to advance"}
             </p>
+          )}
+
+          {/* Voice command pills */}
+          {speechSupported && (
+            <div style={styles.voiceCommandRow}>
+              {[
+                { label: "▶ next", hint: "advance" },
+                { label: "↺ repeat", hint: "re-read step" },
+                { label: "← back", hint: "previous step" },
+                { label: "🥕 ingredients", hint: "hear ingredient list" },
+              ].map((cmd) => (
+                <div key={cmd.label} style={{
+                  ...styles.voiceCommandPill,
+                  ...(listeningForNext ? styles.voiceCommandPillActive : {}),
+                }}>
+                  <span style={styles.voiceCommandLabel}>{cmd.label}</span>
+                  <span style={styles.voiceCommandHint}>{cmd.hint}</span>
+                </div>
+              ))}
+            </div>
           )}
         </div>
 
@@ -1566,6 +1649,39 @@ const styles: Record<string, React.CSSProperties> = {
     textAlign: "center" as const,
     margin: 0,
     lineHeight: 1.5,
+  },
+  voiceCommandRow: {
+    display: "flex",
+    flexWrap: "wrap" as const,
+    gap: 8,
+    justifyContent: "center",
+    maxWidth: 480,
+  },
+  voiceCommandPill: {
+    display: "flex",
+    flexDirection: "column" as const,
+    alignItems: "center",
+    background: "#141414",
+    border: "1px solid #2a2a2a",
+    borderRadius: 12,
+    padding: "8px 14px",
+    minWidth: 80,
+    transition: "border-color 0.2s, background 0.2s",
+  },
+  voiceCommandPillActive: {
+    border: "1px solid #22c55e44",
+    background: "#0f1f0f",
+  },
+  voiceCommandLabel: {
+    color: "#ccc",
+    fontSize: 13,
+    fontWeight: 700,
+    letterSpacing: 0.2,
+  },
+  voiceCommandHint: {
+    color: "#555",
+    fontSize: 11,
+    marginTop: 2,
   },
   cookingFooter: {
     padding: "20px 24px 40px",
