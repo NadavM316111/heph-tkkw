@@ -147,6 +147,26 @@ export default function SousPage() {
     }, 1000);
   }, [clearStepTimer]);
   const synthStopRef = useRef(false);
+  const warningIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  /** Format a duration in seconds to a human-readable speech string */
+  const formatDurationSpeech = useCallback((seconds: number): string => {
+    const h = Math.floor(seconds / 3600);
+    const m = Math.floor((seconds % 3600) / 60);
+    const s = seconds % 60;
+    const parts: string[] = [];
+    if (h > 0) parts.push(`${h} hour${h !== 1 ? "s" : ""}`);
+    if (m > 0) parts.push(`${m} minute${m !== 1 ? "s" : ""}`);
+    if (s > 0 && h === 0) parts.push(`${s} second${s !== 1 ? "s" : ""}`);
+    return parts.join(" and ");
+  }, []);
+
+  /** Format seconds as MM:SS for the ring display */
+  const formatTimerDisplay = useCallback((seconds: number): string => {
+    const m = Math.floor(seconds / 60);
+    const s = seconds % 60;
+    return `${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`;
+  }, []);
 
   // Detect speech support on mount
   useEffect(() => {
@@ -221,6 +241,7 @@ export default function SousPage() {
       recognitionRef.current = null;
     }
     setListeningForNext(false);
+    clearStepTimer();
 
     if (!("speechSynthesis" in window)) return;
 
@@ -237,7 +258,66 @@ export default function SousPage() {
 
     utt.onend = () => {
       if (synthStopRef.current) return;
-      startListening();
+
+      // Check if this step has a duration — if so, start a countdown timer
+      const duration = parseStepDuration(current.instruction);
+      if (duration > 0) {
+        // Announce the timer starting
+        const announceUtt = new SpeechSynthesisUtterance(
+          `Timer started for ${formatDurationSpeech(duration)}.`
+        );
+        announceUtt.rate = 0.95;
+        announceUtt.lang = "en-US";
+
+        // Track whether we've already spoken the "2 minutes left" warning
+        let warned = false;
+
+        announceUtt.onend = () => {
+          if (synthStopRef.current) return;
+
+          startStepTimer(duration, () => {
+            // onDone: speak "time's up" then start listening
+            if (synthStopRef.current) return;
+            const doneUtt = new SpeechSynthesisUtterance(
+              "Time's up! Say next when you're ready to continue."
+            );
+            doneUtt.rate = 0.95;
+            doneUtt.lang = "en-US";
+            doneUtt.onend = () => {
+              if (!synthStopRef.current) startListening();
+            };
+            window.speechSynthesis.cancel();
+            window.speechSynthesis.speak(doneUtt);
+          });
+
+          // Set up a watcher to speak the "2 minutes left" warning
+          const warningInterval = setInterval(() => {
+            if (synthStopRef.current) { clearInterval(warningInterval); return; }
+            setStepTimerLeft((left) => {
+              // Warn at exactly 120 s (or when ≤120 s remain if we somehow skipped it)
+              if (!warned && left > 0 && left <= 120 && duration > 150) {
+                warned = true;
+                clearInterval(warningInterval);
+                if (!synthStopRef.current && !window.speechSynthesis.speaking) {
+                  const warnUtt = new SpeechSynthesisUtterance("2 minutes left.");
+                  warnUtt.rate = 0.95;
+                  warnUtt.lang = "en-US";
+                  window.speechSynthesis.speak(warnUtt);
+                }
+              }
+              return left; // don't mutate
+            });
+          }, 1000);
+
+          // Store the warning interval id so cleanup can clear it
+          (warningIntervalRef as React.MutableRefObject<ReturnType<typeof setInterval> | null>).current = warningInterval;
+        };
+
+        window.speechSynthesis.speak(announceUtt);
+      } else {
+        // No timer — go straight to listening
+        startListening();
+      }
     };
 
     window.speechSynthesis.speak(utt);
@@ -250,6 +330,11 @@ export default function SousPage() {
         recognitionRef.current = null;
       }
       setListeningForNext(false);
+      clearStepTimer();
+      if (warningIntervalRef.current) {
+        clearInterval(warningIntervalRef.current);
+        warningIntervalRef.current = null;
+      }
     };
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [appState, cookingStep, activeRecipe]);
@@ -1418,6 +1503,86 @@ Search your knowledge of real recipes from cookbooks and food websites. Give me 
 
           <p style={styles.stepInstruction}>{current.instruction}</p>
 
+          {/* Ring timer — only shown when a timed step is active */}
+          {stepTimerTotal > 0 && (
+            <div style={styles.timerRingWrap}>
+              {(() => {
+                const SIZE = 120;
+                const STROKE = 8;
+                const R = (SIZE - STROKE) / 2;
+                const CIRC = 2 * Math.PI * R;
+                const fraction = stepTimerDone
+                  ? 0
+                  : stepTimerTotal > 0
+                  ? stepTimerLeft / stepTimerTotal
+                  : 1;
+                const dashOffset = CIRC * (1 - fraction);
+                const color = stepTimerDone
+                  ? "#22c55e"
+                  : stepTimerLeft <= 30
+                  ? "#ef4444"
+                  : stepTimerLeft <= 120
+                  ? "#f59e0b"
+                  : "#FF6B35";
+                return (
+                  <svg width={SIZE} height={SIZE} style={{ display: "block" }}>
+                    {/* Track */}
+                    <circle
+                      cx={SIZE / 2}
+                      cy={SIZE / 2}
+                      r={R}
+                      fill="none"
+                      stroke="#222"
+                      strokeWidth={STROKE}
+                    />
+                    {/* Progress arc */}
+                    <circle
+                      cx={SIZE / 2}
+                      cy={SIZE / 2}
+                      r={R}
+                      fill="none"
+                      stroke={color}
+                      strokeWidth={STROKE}
+                      strokeLinecap="round"
+                      strokeDasharray={CIRC}
+                      strokeDashoffset={dashOffset}
+                      transform={`rotate(-90 ${SIZE / 2} ${SIZE / 2})`}
+                      style={{ transition: "stroke-dashoffset 0.9s linear, stroke 0.4s" }}
+                    />
+                    {/* Time label */}
+                    <text
+                      x={SIZE / 2}
+                      y={SIZE / 2 - 6}
+                      textAnchor="middle"
+                      dominantBaseline="middle"
+                      fill={stepTimerDone ? "#22c55e" : "#fff"}
+                      fontSize="18"
+                      fontWeight="800"
+                      fontFamily="monospace"
+                    >
+                      {stepTimerDone ? "✓" : formatTimerDisplay(stepTimerLeft)}
+                    </text>
+                    {/* "done" / "timer" sub-label */}
+                    <text
+                      x={SIZE / 2}
+                      y={SIZE / 2 + 14}
+                      textAnchor="middle"
+                      dominantBaseline="middle"
+                      fill="#666"
+                      fontSize="10"
+                      fontWeight="600"
+                    >
+                      {stepTimerDone ? "DONE" : "TIMER"}
+                    </text>
+                  </svg>
+                );
+              })()}
+              {stepTimerDone && (
+                <p style={styles.timerDoneLabel}>⏰ Time's up — say "next" or tap below</p>
+              )}
+            </div>
+          )}
+
           {/* Listening indicator */}
           {listeningForNext && (
             <div style={styles.listeningBadge}>
@@ -2522,6 +2687,22 @@ const styles: Record<string, React.CSSProperties> = {
     justifyContent: "center",
     gap: 8,
     transition: "opacity 0.2s",
+  },
+
+  // Ring timer
+  timerRingWrap: {
+    display: "flex",
+    flexDirection: "column" as const,
+    alignItems: "center",
+    gap: 10,
+  },
+  timerDoneLabel: {
+    color: "#22c55e",
+    fontSize: 13,
+    fontWeight: 700,
+    margin: 0,
+    textAlign: "center" as const,
+    animation: "pulse 1.2s ease-in-out infinite",
   },
 
   // Done
