@@ -31,6 +31,7 @@ export default function RecipePage({ params }: { params: { id: string } }) {
   const [shared, setShared] = useState(false);
   const [isOffline, setIsOffline] = useState(false);
   const [servedFromCache, setServedFromCache] = useState(false);
+  const [savedForOffline, setSavedForOffline] = useState(false);
   const recognitionRef = useRef<any>(null);
 
   // Offline detection
@@ -71,6 +72,17 @@ export default function RecipePage({ params }: { params: { id: string } }) {
         setLoading(false);
       });
     return () => controller.abort();
+  }, [params.id]);
+
+  // Check Cache Storage to show "Saved for offline" badge
+  useEffect(() => {
+    if (typeof window === "undefined" || !("caches" in window)) return;
+    const url = `/api/recipes/${params.id}`;
+    window.caches.open("recipes-v1").then((cache) =>
+      cache.match(url).then((hit) => {
+        if (hit) setSavedForOffline(true);
+      })
+    ).catch(() => {});
   }, [params.id]);
 
   const steps: RecipeStep[] = recipe?.steps ?? [];
@@ -191,10 +203,15 @@ export default function RecipePage({ params }: { params: { id: string } }) {
   return (
     <div style={s.page}>
 
-      {/* Offline banner */}
+      {/* Offline / cached banners */}
       {showOfflineBanner && (
         <div style={s.offlineBanner}>
           📴 Offline – using saved recipe
+        </div>
+      )}
+      {!showOfflineBanner && savedForOffline && (
+        <div style={s.savedBanner}>
+          ✅ Saved for offline
         </div>
       )}
 
@@ -781,6 +798,18 @@ const s: Record<string, React.CSSProperties> = {
     border: "1px solid #f59e0b44",
     padding: "10px 20px",
     fontSize: 13,
+    fontWeight: 700,
+    textAlign: "center" as const,
+    letterSpacing: 0.2,
+    width: "100%",
+    boxSizing: "border-box" as const,
+  },
+  savedBanner: {
+    background: "#0d2b0d",
+    color: "#4ade80",
+    border: "1px solid #22c55e44",
+    padding: "8px 20px",
+    fontSize: 12,
     fontWeight: 700,
     textAlign: "center" as const,
     letterSpacing: 0.2,

@@ -75,6 +75,7 @@ export default function SousPage() {
 
   const [recentRecipes, setRecentRecipes] = useState<(Recipe & { uuid: string; last_cooked_at: string | null })[]>([]);
   const [recentLoading, setRecentLoading] = useState(false);
+  const [cachedRecipeUuids, setCachedRecipeUuids] = useState<Set<string>>(new Set());
 
   const [recipes, setRecipes] = useState<Recipe[]>([]);
   const [recipeUuids, setRecipeUuids] = useState<Record<string, string>>({});
@@ -987,6 +988,22 @@ Search your knowledge of real recipes from cookbooks and food websites. Give me 
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [appState, user]);
 
+  // ── Check which recent recipes are cached for offline use ─────────────
+  useEffect(() => {
+    if (appState !== "home" || recentRecipes.length === 0) return;
+    if (typeof window === "undefined" || !("caches" in window)) return;
+    window.caches.open("recipes-v1").then((cache) => {
+      Promise.all(
+        recentRecipes.map((r) =>
+          cache.match(`/api/recipes/${r.uuid}`).then((hit) => hit ? r.uuid : null)
+        )
+      ).then((results) => {
+        const cached = new Set<string>(results.filter((u): u is string => u !== null));
+        setCachedRecipeUuids(cached);
+      });
+    }).catch(() => {});
+  }, [appState, recentRecipes]);
+
   // ── Helper: format a UTC date string as a relative label ──────────────
   const formatRelativeDate = (iso: string): string => {
     const diff = Date.now() - new Date(iso).getTime();
@@ -1157,6 +1174,9 @@ Search your knowledge of real recipes from cookbooks and food websites. Give me 
                             ? ` · cooked ${formatRelativeDate(r.last_cooked_at)}`
                             : ""}
                         </span>
+                        {cachedRecipeUuids.has(r.uuid) && (
+                          <span style={styles.offlineBadge}>✅ Saved for offline</span>
+                        )}
                       </div>
                       <span style={styles.recentCardArrow}>▶</span>
                     </div>
@@ -3344,6 +3364,18 @@ const styles: Record<string, React.CSSProperties> = {
     color: "#FF6B35",
     fontSize: 14,
     flexShrink: 0,
+  },
+  offlineBadge: {
+    display: "inline-block",
+    background: "#0d2b0d",
+    color: "#4ade80",
+    border: "1px solid #22c55e44",
+    borderRadius: 20,
+    padding: "2px 8px",
+    fontSize: 11,
+    fontWeight: 700,
+    marginTop: 2,
+    letterSpacing: 0.1,
   },
 
   // Offline banner
