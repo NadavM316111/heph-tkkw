@@ -243,7 +243,7 @@ export default function WatchMeCookOverlay({
             ...overlayStyles.checkBtn,
             opacity: checking || !cameraReady ? 0.55 : 1,
           }}
-          onClick={checkPan}
+          onClick={() => checkPan()}
           disabled={checking || !cameraReady}
         >
           {checking ? (
