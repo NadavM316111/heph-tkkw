@@ -67,6 +67,61 @@ export default function SousPage() {
   const streamRef = useRef<MediaStream | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const recognitionRef = useRef<any>(null);
+
+  // ── Parse a step instruction for a duration (returns seconds, or 0) ────────
+  const parseStepDuration = useCallback((instruction: string): number => {
+    // Matches patterns like: "5 minutes", "1 minute", "30 seconds", "1 hour 30 minutes"
+    const text = instruction.toLowerCase();
+    let totalSeconds = 0;
+
+    const hourMatch   = text.match(/(\d+(?:\.\d+)?)\s*hour/);
+    const minMatch    = text.match(/(\d+(?:\.\d+)?)\s*min/);
+    const secMatch    = text.match(/(\d+(?:\.\d+)?)\s*sec/);
+
+    if (hourMatch) totalSeconds += parseFloat(hourMatch[1]) * 3600;
+    if (minMatch)  totalSeconds += parseFloat(minMatch[1])  * 60;
+    if (secMatch)  totalSeconds += parseFloat(secMatch[1]);
+
+    // Only start a timer if the instruction implies an action with duration
+    // (e.g. "cook for", "simmer for", "bake for", "wait", "let rest", "heat for")
+    const actionWords = /cook|simmer|bake|roast|fry|boil|steam|heat|wait|rest|let|marinate|chill|refrigerat|whisk|stir|knead|soak|reduce/;
+    if (totalSeconds > 0 && actionWords.test(text)) {
+      return Math.round(totalSeconds);
+    }
+    return 0;
+  }, []);
+
+  // ── Clear any running step timer ───────────────────────────────────────────
+  const clearStepTimer = useCallback(() => {
+    if (stepTimerRef.current) {
+      clearInterval(stepTimerRef.current);
+      stepTimerRef.current = null;
+    }
+    setStepTimerTotal(0);
+    setStepTimerLeft(0);
+    setStepTimerDone(false);
+  }, []);
+
+  // ── Start a countdown for `seconds` ───────────────────────────────────────
+  const startStepTimer = useCallback((seconds: number, onDone: () => void) => {
+    clearStepTimer();
+    setStepTimerTotal(seconds);
+    setStepTimerLeft(seconds);
+    setStepTimerDone(false);
+
+    stepTimerRef.current = setInterval(() => {
+      setStepTimerLeft((prev) => {
+        if (prev <= 1) {
+          clearInterval(stepTimerRef.current!);
+          stepTimerRef.current = null;
+          setStepTimerDone(true);
+          onDone();
+          return 0;
+        }
+        return prev - 1;
+      });
+    }, 1000);
+  }, [clearStepTimer]);
   const synthStopRef = useRef(false);
 
   // Detect speech support on mount
