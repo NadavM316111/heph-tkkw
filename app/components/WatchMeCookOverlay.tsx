@@ -32,7 +32,8 @@ export default function WatchMeCookOverlay({
   const [substituteCard, setSubstituteCard] = useState<SubstituteCard | null>(null);
   const [substituteLoading, setSubstituteLoading] = useState(false);
   const commentaryEndRef = useRef<HTMLDivElement>(null);
-  const recognitionRef = useRef<InstanceType<typeof (window as any).webkitSpeechRecognition> | null>(null);
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const recognitionRef = useRef<any>(null);
   const listeningRef = useRef(false);
 
   // Pulse the LIVE badge
