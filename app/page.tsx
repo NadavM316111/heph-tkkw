@@ -67,6 +67,10 @@ export default function SousPage() {
   const streamRef = useRef<MediaStream | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const recognitionRef = useRef<any>(null);
+  const stepTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const [stepTimerTotal, setStepTimerTotal] = useState(0);
+  const [stepTimerLeft, setStepTimerLeft] = useState(0);
+  const [stepTimerDone, setStepTimerDone] = useState(false);
 
   // ── Parse a step instruction for a duration (returns seconds, or 0) ────────
   const parseStepDuration = useCallback((instruction: string): number => {
