@@ -22,6 +22,7 @@ export default function WatchMeCookOverlay({
   const [checking, setChecking] = useState(false);
   const [checkResult, setCheckResult] = useState<string | null>(null);
   const [checkError, setCheckError] = useState("");
+  const [autoStopToast, setAutoStopToast] = useState(false);
 
   // Start camera on mount
   useEffect(() => {
@@ -167,6 +168,17 @@ export default function WatchMeCookOverlay({
     [checking, stepInstruction]
   );
 
+  // ── 20-minute auto-stop ───────────────────────────────────────────────
+  useEffect(() => {
+    if (elapsedSeconds < 1200) return;
+    window.speechSynthesis?.cancel();
+    setAutoStopToast(true);
+    const id = setTimeout(() => {
+      onStop();
+    }, 3000);
+    return () => clearTimeout(id);
+  }, [elapsedSeconds, onStop]);
+
   // ── 60-second auto-check loop ─────────────────────────────────────────
   // Uses setTimeout (not setInterval) so the 60 s window starts AFTER any
   // speech has finished, preventing overlapping announcements.
@@ -261,6 +273,31 @@ export default function WatchMeCookOverlay({
           ⏹ Stop
         </button>
       </div>
+
+      {/* Auto-stop toast */}
+      {autoStopToast && (
+        <div
+          style={{
+            pointerEvents: "none",
+            position: "absolute",
+            top: 24,
+            left: 16,
+            right: 16,
+            background: "rgba(20,20,20,0.97)",
+            border: "1px solid rgba(255,107,53,0.5)",
+            borderRadius: 14,
+            padding: "14px 18px",
+            color: "#fff",
+            fontSize: 15,
+            fontWeight: 600,
+            textAlign: "center",
+            boxShadow: "0 4px 24px rgba(0,0,0,0.6)",
+            zIndex: 300,
+          }}
+        >
+          ⏱ 20 minutes reached — stopping session…
+        </div>
+      )}
 
       {/* AI feedback bubble */}
       {(checkResult || checkError) && (
