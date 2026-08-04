@@ -1,0 +1,36 @@
+*, *::before, *::after {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+html, body {
+  height: 100%;
+  background: #111;
+  color: #fff;
+  font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  overscroll-behavior: none;
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+
+input:-webkit-autofill {
+  -webkit-box-shadow: 0 0 0 100px #222 inset !important;
+  -webkit-text-fill-color: #fff !important;
+}
+
+button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+button:active:not(:disabled) {
+  opacity: 0.8;
+}
+
+img {
+  max-width: 100%;
+}
