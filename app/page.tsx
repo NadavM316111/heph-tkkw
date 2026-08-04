@@ -78,6 +78,11 @@ export default function SousPage() {
 
   const [recipes, setRecipes] = useState<Recipe[]>([]);
   const [recipeUuids, setRecipeUuids] = useState<Record<string, string>>({});
+  // Per-recipe adapt controls: keyed by recipe index
+  const [adaptMultiplier, setAdaptMultiplier] = useState<Record<number, number>>({});
+  const [adaptDifficulty, setAdaptDifficulty] = useState<Record<number, string>>({});
+  const [adaptLoading, setAdaptLoading] = useState<Record<number, boolean>>({});
+  const [adaptedRecipes, setAdaptedRecipes] = useState<Record<number, Recipe>>({});
   const [activeRecipe, setActiveRecipe] = useState<Recipe | null>(null);
   const [activeRecipeUuid, setActiveRecipeUuid] = useState<string | null>(null);
   const [pendingRecipe, setPendingRecipe] = useState<Recipe | null>(null);
@@ -664,6 +669,27 @@ export default function SousPage() {
       setCookingStep((p) => p + 1);
     }
   }, [activeRecipe, cookingStep]);
+
+  const handleAdaptRecipe = useCallback(async (index: number, baseRecipe: Recipe) => {
+    const multiplier = adaptMultiplier[index] ?? 1;
+    const difficulty = adaptDifficulty[index] ?? "as-is";
+    if (multiplier === 1 && difficulty === "as-is") return;
+    setAdaptLoading((prev) => ({ ...prev, [index]: true }));
+    try {
+      const res = await fetch("/api/recipes/adapt", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ recipe: baseRecipe, multiplier, difficulty }),
+      });
+      if (!res.ok) throw new Error("Adapt failed");
+      const { recipe: adapted } = await res.json();
+      setAdaptedRecipes((prev) => ({ ...prev, [index]: adapted }));
+    } catch (err: unknown) {
+      alert(err instanceof Error ? err.message : "Could not adapt recipe. Please try again.");
+    } finally {
+      setAdaptLoading((prev) => ({ ...prev, [index]: false }));
+    }
+  }, [adaptMultiplier, adaptDifficulty]);
 
   const startCooking = useCallback((recipe: Recipe) => {
     setActiveRecipe(recipe);
@@ -1525,23 +1551,30 @@ Search your knowledge of real recipes from cookbooks and food websites. Give me 
               (a.extra_ingredients_needed?.length ?? 0) -
               (b.extra_ingredients_needed?.length ?? 0)
             )
-            .map((recipe, i) => {
-              const missing = recipe.extra_ingredients_needed ?? [];
+            .map((recipe, sortedI) => {
+              // Find the original index so adapt state keys are stable
+              const i = recipes.indexOf(recipe);
+              const displayRecipe = adaptedRecipes[i] ?? recipe;
+              const missing = displayRecipe.extra_ingredients_needed ?? [];
               const canCookNow = missing.length === 0;
               const almostThere = missing.length > 0 && missing.length <= 2;
+              const multiplier = adaptMultiplier[i] ?? 1;
+              const difficulty = adaptDifficulty[i] ?? "as-is";
+              const isAdapted = !!adaptedRecipes[i];
+              const isLoading = !!adaptLoading[i];
+              const isDirty = multiplier !== 1 || difficulty !== "as-is";
               return (
-                <button
-                  key={i}
+                <div
+                  key={sortedI}
                   style={{
                     ...styles.recipeCard,
                     ...(canCookNow ? styles.recipeCardReady : {}),
                     ...(almostThere ? styles.recipeCardAlmost : {}),
                   }}
-                  onClick={() => requestStartCooking(recipe)}
                 >
                   <div style={styles.recipeCardHeader}>
-                    <span style={styles.recipeTitle}>{recipe.title}</span>
-                    <span style={styles.recipeBadge}>{recipe.difficulty}</span>
+                    <span style={styles.recipeTitle}>{displayRecipe.title}</span>
+                    <span style={styles.recipeBadge}>{displayRecipe.difficulty}</span>
                   </div>
 
                   {/* Ready / Almost badge */}
@@ -1553,7 +1586,78 @@ Search your knowledge of real recipes from cookbooks and food websites. Give me 
                     </div>
                   )}
 
-                  <p style={styles.recipeDesc}>{recipe.description}</p>
+                  <p style={styles.recipeDesc}>{displayRecipe.description}</p>
+
+                  {/* ── Adapt controls ── */}
+                  <div style={styles.adaptSection} onClick={(e) => e.stopPropagation()}>
+                    <div style={styles.adaptRow}>
+                      <span style={styles.adaptLabel}>Servings</span>
+                      <div style={styles.adaptPillGroup}>
+                        {([0.5, 1, 2, 4] as const).map((m) => (
+                          <button
+                            key={m}
+                            style={{
+                              ...styles.adaptPill,
+                              ...(multiplier === m ? styles.adaptPillActive : {}),
+                            }}
+                            onClick={() => {
+                              setAdaptMultiplier((prev) => ({ ...prev, [i]: m }));
+                              setAdaptedRecipes((prev) => {
+                                const next = { ...prev };
+                                delete next[i];
+                                return next;
+                              });
+                            }}
+                          >
+                            {m === 0.5 ? "½×" : `${m}×`}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                    <div style={styles.adaptRow}>
+                      <span style={styles.adaptLabel}>Style</span>
+                      <div style={styles.adaptPillGroup}>
+                        {(["simplify", "as-is", "challenge"] as const).map((d) => (
+                          <button
+                            key={d}
+                            style={{
+                              ...styles.adaptPill,
+                              ...(difficulty === d ? styles.adaptPillActive : {}),
+                            }}
+                            onClick={() => {
+                              setAdaptDifficulty((prev) => ({ ...prev, [i]: d }));
+                              setAdaptedRecipes((prev) => {
+                                const next = { ...prev };
+                                delete next[i];
+                                return next;
+                              });
+                            }}
+                          >
+                            {d === "simplify" ? "Simplify" : d === "as-is" ? "As-is" : "Challenge me"}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                    {isDirty && (
+                      <button
+                        style={{
+                          ...styles.adaptApplyBtn,
+                          ...(isLoading ? { opacity: 0.5, cursor: "not-allowed" } : {}),
+                        }}
+                        disabled={isLoading}
+                        onClick={() => handleAdaptRecipe(i, recipe)}
+                      >
+                        {isLoading
+                          ? "✨ Adapting…"
+                          : isAdapted
+                          ? "✨ Re-adapt recipe"
+                          : "✨ Adapt recipe"}
+                      </button>
+                    )}
+                    {isAdapted && !isLoading && (
+                      <div style={styles.adaptedBadge}>✨ Adapted</div>
+                    )}
+                  </div>
 
                   {/* Missing ingredient tags + order button */}
                   {missing.length > 0 && (
@@ -1565,21 +1669,28 @@ Search your knowledge of real recipes from cookbooks and food websites. Give me 
                       </div>
                       <button
                         style={styles.orderMissingBtn}
-                        onClick={(e) => openOrderSheet(recipe, e)}
+                        onClick={(e) => openOrderSheet(displayRecipe, e)}
                       >
                         🛒 Order missing ingredients
                       </button>
                     </>
                   )}
 
-                  {recipe.source_inspiration && (
-                    <p style={styles.recipeSource}>🔗 {recipe.source_inspiration}</p>
+                  {displayRecipe.source_inspiration && (
+                    <p style={styles.recipeSource}>🔗 {displayRecipe.source_inspiration}</p>
                   )}
                   <div style={styles.recipeMeta}>
-                    <span>⏱ {recipe.total_time_minutes} min</span>
-                    <span>📋 {recipe.steps.length} steps</span>
+                    <span>⏱ {displayRecipe.total_time_minutes} min</span>
+                    <span>📋 {displayRecipe.steps.length} steps</span>
                   </div>
-                </button>
+
+                  <button
+                    style={styles.startCookingBtn}
+                    onClick={() => requestStartCooking(displayRecipe)}
+                  >
+                    🍳 Start cooking
+                  </button>
+                </div>
               );
             })}
 
@@ -2887,6 +2998,87 @@ const styles: Record<string, React.CSSProperties> = {
     fontSize: 20,
     fontWeight: 800,
   },
+  // Adapt controls
+  adaptSection: {
+    background: "#111",
+    border: "1px solid #222",
+    borderRadius: 14,
+    padding: "12px 14px",
+    display: "flex",
+    flexDirection: "column" as const,
+    gap: 10,
+  },
+  adaptRow: {
+    display: "flex",
+    alignItems: "center",
+    gap: 10,
+    flexWrap: "wrap" as const,
+  },
+  adaptLabel: {
+    color: "#666",
+    fontSize: 12,
+    fontWeight: 700,
+    textTransform: "uppercase" as const,
+    letterSpacing: 0.5,
+    minWidth: 56,
+    flexShrink: 0,
+  },
+  adaptPillGroup: {
+    display: "flex",
+    gap: 6,
+    flexWrap: "wrap" as const,
+  },
+  adaptPill: {
+    background: "#1a1a1a",
+    color: "#777",
+    border: "1px solid #2a2a2a",
+    borderRadius: 20,
+    padding: "5px 12px",
+    fontSize: 12,
+    fontWeight: 700,
+    cursor: "pointer",
+    transition: "all 0.15s",
+    whiteSpace: "nowrap" as const,
+  },
+  adaptPillActive: {
+    background: "#2a1a0a",
+    color: "#FF6B35",
+    border: "1px solid #FF6B3566",
+  },
+  adaptApplyBtn: {
+    background: "#1a1228",
+    color: "#c4b5fd",
+    border: "1px solid #7c3aed55",
+    borderRadius: 12,
+    padding: "9px 16px",
+    fontSize: 13,
+    fontWeight: 700,
+    cursor: "pointer",
+    width: "100%",
+    transition: "opacity 0.2s",
+  },
+  adaptedBadge: {
+    color: "#a78bfa",
+    fontSize: 12,
+    fontWeight: 700,
+    textAlign: "center" as const,
+    opacity: 0.8,
+  },
+  startCookingBtn: {
+    background: "#FF6B35",
+    color: "#fff",
+    border: "none",
+    borderRadius: 14,
+    padding: "14px 20px",
+    fontSize: 16,
+    fontWeight: 800,
+    cursor: "pointer",
+    width: "100%",
+    marginTop: 4,
+    letterSpacing: 0.2,
+    transition: "opacity 0.2s",
+  },
+
   orderMissingBtn: {
     background: "#1a1a2e",
     color: "#818cf8",
