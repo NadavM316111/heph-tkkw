@@ -65,7 +65,7 @@ export default function SousPage() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
-  const recognitionRef = useRef<InstanceType<typeof (window as any).webkitSpeechRecognition> | null>(null);
+  const recognitionRef = useRef<any>(null);
   const synthStopRef = useRef(false);
 
   // Detect speech support on mount
