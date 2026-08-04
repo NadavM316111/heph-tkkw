@@ -24,7 +24,7 @@ await ensureTable(
 );
 
 export async function POST(req: NextRequest) {
-  const email = await getSessionEmail();
+  const email = getSessionEmail(req);
   if (!email) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
