@@ -3,6 +3,12 @@
 import { useRef, useState, useEffect, useCallback } from "react";
 import WatchMeCookModal from "./components/WatchMeCookModal";
 
+// ── Order sheet state ──────────────────────────────────────────────────────
+interface OrderSheet {
+  recipe: Recipe;
+  selected: Set<string>;
+}
+
 type AppState =
   | "loading"
   | "unauthenticated"
@@ -68,6 +74,9 @@ export default function SousPage() {
   const [activeRecipeUuid, setActiveRecipeUuid] = useState<string | null>(null);
   const [pendingRecipe, setPendingRecipe] = useState<Recipe | null>(null);
   const [showWatchModal, setShowWatchModal] = useState(false);
+  const [orderSheet, setOrderSheet] = useState<OrderSheet | null>(null);
+  const [orderLoading, setOrderLoading] = useState(false);
+  const [orderToast, setOrderToast] = useState(false);
   const [cookingStep, setCookingStep] = useState(0);
   const [listeningForNext, setListeningForNext] = useState(false);
   const [speechSupported, setSpeechSupported] = useState(true);
@@ -147,6 +156,19 @@ export default function SousPage() {
         (window as any).webkitSpeechRecognition || (window as any).SpeechRecognition
       );
       setSpeechSupported(hasSynth && hasRecog);
+    }
+  }, []);
+
+  // Show toast if returning from a successful Stripe checkout
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const params = new URLSearchParams(window.location.search);
+    if (params.get("order") === "success") {
+      setOrderToast(true);
+      // Clean the URL without a reload
+      const clean = window.location.pathname;
+      window.history.replaceState({}, "", clean);
+      setTimeout(() => setOrderToast(false), 5000);
     }
   }, []);
 
@@ -535,6 +557,47 @@ export default function SousPage() {
     setPendingRecipe(recipe);
     setShowWatchModal(true);
   }, []);
+
+  const openOrderSheet = useCallback((recipe: Recipe, e: React.MouseEvent) => {
+    e.stopPropagation();
+    const missing = recipe.extra_ingredients_needed ?? [];
+    setOrderSheet({ recipe, selected: new Set(missing) });
+  }, []);
+
+  const toggleOrderItem = useCallback((item: string) => {
+    setOrderSheet((prev) => {
+      if (!prev) return prev;
+      const next = new Set(prev.selected);
+      if (next.has(item)) next.delete(item);
+      else next.add(item);
+      return { ...prev, selected: next };
+    });
+  }, []);
+
+  const handleOrder = useCallback(async () => {
+    if (!orderSheet || orderSheet.selected.size === 0 || !user) return;
+    setOrderLoading(true);
+    try {
+      const items = Array.from(orderSheet.selected).map((name) => ({
+        name,
+        amount_cents: 100, // £1 placeholder per ingredient
+        quantity: 1,
+        seller_email: user.email,
+      }));
+      const res = await fetch("/api/marketplace/checkout", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ items }),
+      });
+      if (!res.ok) throw new Error("Checkout failed");
+      const { url } = await res.json();
+      if (url) window.location.href = url;
+    } catch (err: unknown) {
+      alert(err instanceof Error ? err.message : "Could not start checkout. Please try again.");
+    } finally {
+      setOrderLoading(false);
+    }
+  }, [orderSheet, user]);
 
   const stopCooking = useCallback(() => {
     synthStopRef.current = true;
@@ -1151,6 +1214,88 @@ Search your knowledge of real recipes from cookbooks and food websites. Give me 
           <h2 style={styles.sectionTitle}>What you can cook</h2>
           <p style={styles.sectionSub}>Tap a recipe to start cooking with voice guidance.</p>
 
+          {/* ── Order confirmation toast ── */}
+          {orderToast && (
+            <div style={styles.orderToast}>
+              ✅ Order placed! Your ingredients are on their way.
+            </div>
+          )}
+
+          {/* ── Order bottom sheet ── */}
+          {orderSheet && (
+            <>
+              <div
+                style={styles.drawerBackdrop}
+                onClick={() => !orderLoading && setOrderSheet(null)}
+              />
+              <div style={styles.orderSheet}>
+                <div style={styles.drawerHandle} />
+                <div style={styles.drawerHeader}>
+                  <h3 style={styles.drawerTitle}>🛒 Order ingredients</h3>
+                  <button
+                    style={styles.drawerClose}
+                    onClick={() => !orderLoading && setOrderSheet(null)}
+                    disabled={orderLoading}
+                  >
+                    ✕
+                  </button>
+                </div>
+                <p style={styles.orderSheetSub}>
+                  Select the items you need for{" "}
+                  <strong style={{ color: "#fff" }}>{orderSheet.recipe.title}</strong>.
+                  Each item is charged at a £1 placeholder price.
+                </p>
+
+                <ul style={styles.orderItemList}>
+                  {(orderSheet.recipe.extra_ingredients_needed ?? []).map((item) => (
+                    <li key={item} style={styles.orderItem}>
+                      <label style={styles.orderItemLabel}>
+                        <input
+                          type="checkbox"
+                          checked={orderSheet.selected.has(item)}
+                          onChange={() => toggleOrderItem(item)}
+                          style={styles.orderCheckbox}
+                          disabled={orderLoading}
+                        />
+                        <span style={styles.orderItemText}>{item}</span>
+                        <span style={styles.orderItemPrice}>£1.00</span>
+                      </label>
+                    </li>
+                  ))}
+                </ul>
+
+                <div style={styles.orderTotalRow}>
+                  <span style={styles.orderTotalLabel}>Total</span>
+                  <span style={styles.orderTotalValue}>
+                    £{orderSheet.selected.size}.00
+                  </span>
+                </div>
+
+                <button
+                  style={{
+                    ...styles.primaryBtn,
+                    ...(orderSheet.selected.size === 0 || orderLoading
+                      ? { opacity: 0.4, cursor: "not-allowed" }
+                      : {}),
+                  }}
+                  onClick={handleOrder}
+                  disabled={orderSheet.selected.size === 0 || orderLoading}
+                >
+                  {orderLoading
+                    ? "Redirecting to checkout…"
+                    : `🛒 Order ${orderSheet.selected.size} item${orderSheet.selected.size !== 1 ? "s" : ""}`}
+                </button>
+                <button
+                  style={styles.ghostBtn}
+                  onClick={() => setOrderSheet(null)}
+                  disabled={orderLoading}
+                >
+                  Cancel
+                </button>
+              </div>
+            </>
+          )}
+
           {showWatchModal && pendingRecipe && (
             <WatchMeCookModal
               recipeName={pendingRecipe.title}
@@ -1204,13 +1349,21 @@ Search your knowledge of real recipes from cookbooks and food websites. Give me 
 
                   <p style={styles.recipeDesc}>{recipe.description}</p>
 
-                  {/* Missing ingredient tags */}
+                  {/* Missing ingredient tags + order button */}
                   {missing.length > 0 && (
-                    <div style={styles.missingRow}>
-                      {missing.map((ing, j) => (
-                        <span key={j} style={styles.missingTag}>{ing}</span>
-                      ))}
-                    </div>
+                    <>
+                      <div style={styles.missingRow}>
+                        {missing.map((ing, j) => (
+                          <span key={j} style={styles.missingTag}>{ing}</span>
+                        ))}
+                      </div>
+                      <button
+                        style={styles.orderMissingBtn}
+                        onClick={(e) => openOrderSheet(recipe, e)}
+                      >
+                        🛒 Order missing ingredients
+                      </button>
+                    </>
                   )}
 
                   {recipe.source_inspiration && (
@@ -2241,6 +2394,117 @@ const styles: Record<string, React.CSSProperties> = {
     fontSize: 11,
     marginLeft: 6,
     opacity: 0.7,
+  },
+
+  // Order sheet
+  orderSheet: {
+    position: "fixed" as const,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    maxHeight: "80dvh",
+    background: "#161616",
+    borderRadius: "24px 24px 0 0",
+    zIndex: 201,
+    padding: "12px 20px 48px",
+    overflowY: "auto" as const,
+    display: "flex",
+    flexDirection: "column" as const,
+    gap: 8,
+    boxShadow: "0 -4px 40px rgba(0,0,0,0.7)",
+  },
+  orderSheetSub: {
+    color: "#888",
+    fontSize: 13,
+    lineHeight: 1.55,
+    margin: "4px 0 8px",
+  },
+  orderItemList: {
+    listStyle: "none",
+    margin: 0,
+    padding: 0,
+    display: "flex",
+    flexDirection: "column" as const,
+    gap: 8,
+  },
+  orderItem: {
+    background: "#1e1e1e",
+    borderRadius: 12,
+    padding: "12px 14px",
+  },
+  orderItemLabel: {
+    display: "flex",
+    alignItems: "center",
+    gap: 12,
+    cursor: "pointer",
+    width: "100%",
+  },
+  orderCheckbox: {
+    width: 18,
+    height: 18,
+    flexShrink: 0,
+    accentColor: "#FF6B35",
+    cursor: "pointer",
+  },
+  orderItemText: {
+    flex: 1,
+    color: "#ccc",
+    fontSize: 15,
+    textTransform: "capitalize" as const,
+  },
+  orderItemPrice: {
+    color: "#666",
+    fontSize: 13,
+    fontWeight: 600,
+    flexShrink: 0,
+  },
+  orderTotalRow: {
+    display: "flex",
+    justifyContent: "space-between",
+    alignItems: "center",
+    padding: "12px 4px 4px",
+    borderTop: "1px solid #222",
+    marginTop: 4,
+  },
+  orderTotalLabel: {
+    color: "#888",
+    fontSize: 15,
+    fontWeight: 600,
+  },
+  orderTotalValue: {
+    color: "#fff",
+    fontSize: 20,
+    fontWeight: 800,
+  },
+  orderMissingBtn: {
+    background: "#1a1a2e",
+    color: "#818cf8",
+    border: "1px solid #3730a344",
+    borderRadius: 12,
+    padding: "10px 16px",
+    fontSize: 14,
+    fontWeight: 700,
+    cursor: "pointer",
+    width: "100%",
+    textAlign: "left" as const,
+    transition: "opacity 0.2s",
+    marginTop: 2,
+  },
+  orderToast: {
+    position: "fixed" as const,
+    bottom: 80,
+    left: "50%",
+    transform: "translateX(-50%)",
+    background: "#14532d",
+    color: "#86efac",
+    border: "1px solid #22c55e55",
+    borderRadius: 16,
+    padding: "14px 24px",
+    fontSize: 15,
+    fontWeight: 700,
+    zIndex: 999,
+    whiteSpace: "nowrap" as const,
+    boxShadow: "0 4px 24px rgba(0,0,0,0.5)",
   },
 
   shareBtn: {
