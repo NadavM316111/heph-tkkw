@@ -1,6 +1,7 @@
 "use client";
 
 import { useRef, useState, useEffect, useCallback } from "react";
+import { speakText } from "../../lib/watch-cook-utils";
 
 interface WatchMeCookOverlayProps {
   onStop: () => void;
@@ -64,88 +65,144 @@ export default function WatchMeCookOverlay({
     return `${m}:${sec}`;
   };
 
-  const checkPan = useCallback(async () => {
-    if (!videoRef.current || !canvasRef.current || checking) return;
-    setChecking(true);
-    setCheckResult(null);
-    setCheckError("");
+  /**
+   * Captures a frame, asks the AI, updates state, and returns
+   * { hasChange, text } so callers can decide whether / how to speak.
+   *
+   * @param silent  When true the result is shown in the UI but NOT spoken
+   *                (the auto-loop handles speaking itself so it can await it).
+   */
+  const checkPan = useCallback(
+    async (silent = false): Promise<{ hasChange: boolean; text: string }> => {
+      if (!videoRef.current || !canvasRef.current || checking)
+        return { hasChange: false, text: "" };
+      setChecking(true);
+      setCheckResult(null);
+      setCheckError("");
 
-    try {
-      // Capture current video frame
-      const video = videoRef.current;
-      const canvas = canvasRef.current;
-      canvas.width = video.videoWidth || 640;
-      canvas.height = video.videoHeight || 480;
-      const ctx = canvas.getContext("2d");
-      if (!ctx) throw new Error("Canvas unavailable");
-      ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+      try {
+        // Capture current video frame
+        const video = videoRef.current;
+        const canvas = canvasRef.current;
+        canvas.width = video.videoWidth || 640;
+        canvas.height = video.videoHeight || 480;
+        const ctx = canvas.getContext("2d");
+        if (!ctx) throw new Error("Canvas unavailable");
+        ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
 
-      // Convert to blob
-      const blob = await new Promise<Blob | null>((resolve) =>
-        canvas.toBlob(resolve, "image/jpeg", 0.85)
-      );
-      if (!blob) throw new Error("Could not capture frame");
+        // Convert to blob
+        const blob = await new Promise<Blob | null>((resolve) =>
+          canvas.toBlob(resolve, "image/jpeg", 0.85)
+        );
+        if (!blob) throw new Error("Could not capture frame");
 
-      // Upload frame
-      const formData = new FormData();
-      formData.append("file", blob, "pan-check.jpg");
-      const uploadRes = await fetch("/api/upload", {
-        method: "POST",
-        body: formData,
-      });
-      if (!uploadRes.ok) throw new Error("Upload failed");
-      const { url } = await uploadRes.json();
+        // Upload frame
+        const formData = new FormData();
+        formData.append("file", blob, "pan-check.jpg");
+        const uploadRes = await fetch("/api/upload", {
+          method: "POST",
+          body: formData,
+        });
+        if (!uploadRes.ok) throw new Error("Upload failed");
+        const { url } = await uploadRes.json();
 
-      // Ask AI to evaluate what's in the pan
-      const contextText = stepInstruction
-        ? `The cook is currently on this step: "${stepInstruction}". `
-        : "";
+        // Ask AI to evaluate what's in the pan
+        const contextText = stepInstruction
+          ? `The cook is currently on this step: "${stepInstruction}". `
+          : "";
 
-      const aiRes = await fetch("/api/ai", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          system:
-            "You are a helpful cooking assistant watching someone cook. When shown a photo of food cooking in a pan or pot, give a short (1–2 sentence) practical observation: describe what you see and whether it looks on track, needs attention, or is done. Be encouraging but honest. No markdown.",
-          messages: [
-            {
-              role: "user",
-              content: [
-                {
-                  type: "text",
-                  text:
-                    contextText +
-                    "Please check my pan and tell me how it looks.",
-                },
-                {
-                  type: "image_url",
-                  image_url: { url },
-                },
-              ],
-            },
-          ],
-        }),
-      });
-      if (!aiRes.ok) throw new Error("AI check failed");
-      const { text } = await aiRes.json();
-      setCheckResult(text);
+        const aiRes = await fetch("/api/ai", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            system:
+              "You are a helpful cooking assistant watching someone cook. When shown a photo of food cooking in a pan or pot, give a short (1–2 sentence) practical observation: describe what you see and whether it looks on track, needs attention, or is done. If nothing notable has changed and everything looks fine, reply with exactly the word NOCHANGE and nothing else. Be encouraging but honest. No markdown.",
+            messages: [
+              {
+                role: "user",
+                content: [
+                  {
+                    type: "text",
+                    text:
+                      contextText +
+                      "Please check my pan and tell me how it looks.",
+                  },
+                  {
+                    type: "image_url",
+                    image_url: { url },
+                  },
+                ],
+              },
+            ],
+          }),
+        });
+        if (!aiRes.ok) throw new Error("AI check failed");
+        const { text } = await aiRes.json();
 
-      // Read result aloud if speech is available
-      if ("speechSynthesis" in window) {
-        window.speechSynthesis.cancel();
-        const utt = new SpeechSynthesisUtterance(text);
-        utt.rate = 0.95;
-        utt.lang = "en-US";
-        window.speechSynthesis.speak(utt);
+        // NOCHANGE means the auto-loop should stay quiet
+        const hasChange = text.trim().toUpperCase() !== "NOCHANGE";
+
+        if (hasChange) {
+          setCheckResult(text);
+          // Manual taps speak immediately; the auto-loop awaits speakText itself
+          if (!silent && "speechSynthesis" in window) {
+            window.speechSynthesis.cancel();
+            const utt = new SpeechSynthesisUtterance(text);
+            utt.rate = 0.95;
+            utt.lang = "en-US";
+            window.speechSynthesis.speak(utt);
+          }
+        }
+
+        return { hasChange, text };
+      } catch (err: unknown) {
+        setCheckError(
+          err instanceof Error ? err.message : "Something went wrong"
+        );
+        return { hasChange: false, text: "" };
+      } finally {
+        setChecking(false);
       }
-    } catch (err: unknown) {
-      setCheckError(
-        err instanceof Error ? err.message : "Something went wrong"
-      );
-    } finally {
-      setChecking(false);
-    }
-  }, [checking, stepInstruction]);
+    },
+    [checking, stepInstruction]
+  );
+
+  // ── 60-second auto-check loop ─────────────────────────────────────────
+  // Uses setTimeout (not setInterval) so the 60 s window starts AFTER any
+  // speech has finished, preventing overlapping announcements.
+  useEffect(() => {
+    if (!cameraReady) return; // don't start until camera is up
+
+    let cancelled = false;
+    let timeoutId: ReturnType<typeof setTimeout>;
+
+    const loop = () => {
+      timeoutId = setTimeout(async () => {
+        if (cancelled) return;
+
+        // silent=true so checkPan does not call speechSynthesis itself
+        const { hasChange, text } = await checkPan(true);
+
+        // Only speak (and await completion) when something changed
+        if (!cancelled && hasChange && text) {
+          await speakText(text).catch(() => {/* ignore speech errors */});
+        }
+
+        // Schedule the next check only after speech (or the silent check) ends
+        if (!cancelled) loop();
+      }, 60_000);
+    };
+
+    loop();
+    return () => {
+      cancelled = true;
+      clearTimeout(timeoutId);
+      window.speechSynthesis?.cancel();
+    };
+    // checkPan identity changes when `checking` flips, but we want the loop
+    // to use whatever checkPan is current at call-time, not at setup-time.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [cameraReady]);
 
   return (
     <div style={overlayStyles.root}>
