@@ -3,6 +3,11 @@
 import { useRef, useState, useEffect, useCallback } from "react";
 import WatchMeCookModal from "./components/WatchMeCookModal";
 
+interface Substitute {
+  substitute: string;
+  rationale: string;
+}
+
 // ── Order sheet state ──────────────────────────────────────────────────────
 interface OrderSheet {
   recipe: Recipe;
@@ -94,6 +99,13 @@ export default function SousPage() {
   const [stepTimerTotal, setStepTimerTotal] = useState(0);
   const [stepTimerLeft, setStepTimerLeft] = useState(0);
   const [stepTimerDone, setStepTimerDone] = useState(false);
+
+  // Substitute sheet
+  const [subSheetOpen, setSubSheetOpen] = useState(false);
+  const [subIngredient, setSubIngredient] = useState("");
+  const [substitutes, setSubstitutes] = useState<Substitute[]>([]);
+  const [subLoading, setSubLoading] = useState(false);
+  const [subError, setSubError] = useState("");
 
   // ── Parse a step instruction for a duration (returns seconds, or 0) ────────
   const parseStepDuration = useCallback((instruction: string): number => {
@@ -1612,6 +1624,24 @@ Search your knowledge of real recipes from cookbooks and food websites. Give me 
 
           <p style={styles.stepInstruction}>{current.instruction}</p>
 
+          {/* Substitute button */}
+          <button
+            style={styles.subBtn}
+            onClick={() => {
+              // Default to first ingredient in recipe; user can pick from the sheet
+              const allIngredients = [
+                ...(activeRecipe.ingredients_used ?? []),
+                ...(activeRecipe.extra_ingredients_needed ?? []),
+              ];
+              setSubIngredient(allIngredients[0] ?? "");
+              setSubstitutes([]);
+              setSubError("");
+              setSubSheetOpen(true);
+            }}
+          >
+            🔄 Substitute?
+          </button>
+
           {/* Ring timer — only shown when a timed step is active */}
           {stepTimerTotal > 0 && (
             <div style={styles.timerRingWrap}>
@@ -1728,6 +1758,112 @@ Search your knowledge of real recipes from cookbooks and food websites. Give me 
             </div>
           )}
         </div>
+
+        {/* ── Substitute bottom sheet ── */}
+        {subSheetOpen && (
+          <>
+            <div
+              style={styles.drawerBackdrop}
+              onClick={() => setSubSheetOpen(false)}
+            />
+            <div style={styles.subSheet}>
+              <div style={styles.drawerHandle} />
+              <div style={styles.drawerHeader}>
+                <h3 style={styles.drawerTitle}>🔄 Ingredient Substitute</h3>
+                <button
+                  style={styles.drawerClose}
+                  onClick={() => setSubSheetOpen(false)}
+                >
+                  ✕
+                </button>
+              </div>
+
+              {/* Ingredient picker */}
+              <p style={styles.subSheetSub}>
+                Which ingredient do you need to substitute?
+              </p>
+              <div style={styles.subIngredientRow}>
+                {[
+                  ...(activeRecipe.ingredients_used ?? []),
+                  ...(activeRecipe.extra_ingredients_needed ?? []),
+                ].map((ing) => (
+                  <button
+                    key={ing}
+                    style={{
+                      ...styles.subIngredientChip,
+                      ...(subIngredient === ing ? styles.subIngredientChipActive : {}),
+                    }}
+                    onClick={() => {
+                      setSubIngredient(ing);
+                      setSubstitutes([]);
+                      setSubError("");
+                    }}
+                  >
+                    {ing}
+                  </button>
+                ))}
+              </div>
+
+              {/* Find substitutes button */}
+              <button
+                style={{
+                  ...styles.primaryBtn,
+                  marginTop: 8,
+                  opacity: subLoading || !subIngredient ? 0.5 : 1,
+                }}
+                disabled={subLoading || !subIngredient}
+                onClick={async () => {
+                  if (!subIngredient) return;
+                  setSubLoading(true);
+                  setSubError("");
+                  setSubstitutes([]);
+                  try {
+                    const res = await fetch("/api/substitute", {
+                      method: "POST",
+                      headers: { "Content-Type": "application/json" },
+                      body: JSON.stringify({
+                        ingredient: subIngredient,
+                        recipeTitle: activeRecipe.title,
+                        stepInstruction: current.instruction,
+                      }),
+                    });
+                    if (!res.ok) throw new Error("Request failed");
+                    const { substitutes: subs, error } = await res.json();
+                    if (error) throw new Error(error);
+                    setSubstitutes(subs ?? []);
+                  } catch (err: unknown) {
+                    setSubError(err instanceof Error ? err.message : "Something went wrong");
+                  } finally {
+                    setSubLoading(false);
+                  }
+                }}
+              >
+                {subLoading ? "Finding substitutes…" : "🔍 Find substitutes"}
+              </button>
+
+              {subError && <p style={styles.error}>{subError}</p>}
+
+              {/* Results */}
+              {substitutes.length > 0 && (
+                <div style={styles.subResultList}>
+                  {substitutes.map((s, i) => (
+                    <div key={i} style={styles.subCard}>
+                      <span style={styles.subCardTitle}>{s.substitute}</span>
+                      <span style={styles.subCardRationale}>{s.rationale}</span>
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              <button
+                style={{ ...styles.ghostBtn, marginTop: 8 }}
+                onClick={() => setSubSheetOpen(false)}
+              >
+                ✓ Got it — continue cooking
+              </button>
+            </div>
+          </>
+        )}
 
         {/* Bottom controls */}
         <div style={styles.cookingFooter}>
@@ -2797,6 +2933,93 @@ const styles: Record<string, React.CSSProperties> = {
     justifyContent: "center",
     gap: 8,
     transition: "opacity 0.2s",
+  },
+
+  // Substitute button
+  subBtn: {
+    background: "#1e1e2e",
+    color: "#a78bfa",
+    border: "1px solid #4c1d9544",
+    borderRadius: 14,
+    padding: "10px 20px",
+    fontSize: 14,
+    fontWeight: 700,
+    cursor: "pointer",
+    letterSpacing: 0.2,
+    transition: "opacity 0.2s",
+  },
+
+  // Substitute bottom sheet
+  subSheet: {
+    position: "fixed" as const,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    maxHeight: "82dvh",
+    background: "#161616",
+    borderRadius: "24px 24px 0 0",
+    zIndex: 201,
+    padding: "12px 20px 48px",
+    overflowY: "auto" as const,
+    display: "flex",
+    flexDirection: "column" as const,
+    gap: 10,
+    boxShadow: "0 -4px 40px rgba(0,0,0,0.7)",
+  },
+  subSheetSub: {
+    color: "#888",
+    fontSize: 13,
+    margin: "4px 0 4px",
+    lineHeight: 1.5,
+    flexShrink: 0,
+  },
+  subIngredientRow: {
+    display: "flex",
+    flexWrap: "wrap" as const,
+    gap: 8,
+  },
+  subIngredientChip: {
+    background: "#222",
+    color: "#ccc",
+    border: "1px solid #333",
+    borderRadius: 20,
+    padding: "7px 14px",
+    fontSize: 13,
+    fontWeight: 600,
+    cursor: "pointer",
+    transition: "all 0.15s",
+    textTransform: "capitalize" as const,
+  },
+  subIngredientChipActive: {
+    background: "#2e1065",
+    color: "#c4b5fd",
+    border: "1px solid #7c3aed77",
+  },
+  subResultList: {
+    display: "flex",
+    flexDirection: "column" as const,
+    gap: 10,
+    marginTop: 4,
+  },
+  subCard: {
+    background: "#1a1a2e",
+    border: "1px solid #3730a333",
+    borderRadius: 16,
+    padding: "14px 16px",
+    display: "flex",
+    flexDirection: "column" as const,
+    gap: 6,
+  },
+  subCardTitle: {
+    color: "#c4b5fd",
+    fontSize: 16,
+    fontWeight: 800,
+    textTransform: "capitalize" as const,
+  },
+  subCardRationale: {
+    color: "#94a3b8",
+    fontSize: 13,
+    lineHeight: 1.55,
   },
 
   // Ring timer
