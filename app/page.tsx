@@ -3,6 +3,17 @@
 import { useRef, useState, useEffect, useCallback } from "react";
 import WatchMeCookModal from "./components/WatchMeCookModal";
 
+// ── Preference constants ───────────────────────────────────────────────────
+const DIETARY_OPTIONS = [
+  "Vegetarian", "Vegan", "Gluten-free", "Dairy-free", "Nut-free",
+  "Halal", "Kosher", "Low-carb", "Keto", "Paleo", "Low-sodium", "Pescatarian",
+];
+const CUISINE_OPTIONS = [
+  "Italian", "Mexican", "Chinese", "Japanese", "Indian", "Thai", "French",
+  "Mediterranean", "Middle Eastern", "American", "Korean", "Greek", "Spanish",
+  "Vietnamese", "British",
+];
+
 interface Substitute {
   substitute: string;
   rationale: string;
@@ -77,6 +88,16 @@ export default function SousPage() {
   const [pantryDrawerOpen, setPantryDrawerOpen] = useState(false);
   const [pantryItems, setPantryItems] = useState<{ id: number; ingredient: string }[]>([]);
   const [pantryLoading, setPantryLoading] = useState(false);
+
+  // Preferences drawer
+  const [prefsDrawerOpen, setPrefsDrawerOpen] = useState(false);
+  const [prefsDietary, setPrefsDietary] = useState<string[]>([]);
+  const [prefsCuisines, setPrefsCuisines] = useState<string[]>([]);
+  const [prefsLoading, setPrefsLoading] = useState(false);
+  const [prefsSaving, setPrefsSaving] = useState(false);
+  // Working copies while drawer is open
+  const [draftDietary, setDraftDietary] = useState<string[]>([]);
+  const [draftCuisines, setDraftCuisines] = useState<string[]>([]);
 
   const [recentRecipes, setRecentRecipes] = useState<(Recipe & { uuid: string; last_cooked_at: string | null })[]>([]);
   const [recentLoading, setRecentLoading] = useState(false);
@@ -239,7 +260,19 @@ export default function SousPage() {
     setRecentLoading(false);
   }, []);
 
-  // Check session on mount, and load pantry if authenticated
+  // Load preferences from DB
+  const loadPreferences = useCallback(async () => {
+    try {
+      const res = await fetch("/api/preferences");
+      if (res.ok) {
+        const { dietary, cuisines } = await res.json();
+        setPrefsDietary(dietary ?? []);
+        setPrefsCuisines(cuisines ?? []);
+      }
+    } catch {}
+  }, []);
+
+  // Check session on mount, and load pantry + preferences if authenticated
   useEffect(() => {
     fetch("/api/auth")
       .then((r) => r.json())
@@ -254,6 +287,15 @@ export default function SousPage() {
               const names: string[] = (items || []).map((it: { id: number; ingredient: string }) => it.ingredient);
               setPantryIngredients(names);
               setPantryItems(items || []);
+            }
+          } catch {}
+          // Pre-load preferences
+          try {
+            const prefRes = await fetch("/api/preferences");
+            if (prefRes.ok) {
+              const { dietary, cuisines } = await prefRes.json();
+              setPrefsDietary(dietary ?? []);
+              setPrefsCuisines(cuisines ?? []);
             }
           } catch {}
           setAppState("home");
@@ -857,6 +899,24 @@ export default function SousPage() {
     // Auto-save confirmed ingredients to pantry before searching
     savePantry(ingredients);
     setAppState("finding_recipes");
+
+    // Build constraint clause from preferences
+    const constraintLines: string[] = [];
+    if (prefsDietary.length > 0) {
+      constraintLines.push(
+        `DIETARY CONSTRAINTS (hard rules — every recipe MUST comply): ${prefsDietary.join(", ")}.`
+      );
+    }
+    if (prefsCuisines.length > 0) {
+      constraintLines.push(
+        `CUISINE PREFERENCES (prefer recipes from these cuisines where possible): ${prefsCuisines.join(", ")}.`
+      );
+    }
+    const constraintBlock =
+      constraintLines.length > 0
+        ? `\n\nUSER PREFERENCES — YOU MUST FOLLOW THESE:\n${constraintLines.join("\n")}`
+        : "";
+
     try {
       const res = await fetch("/api/ai", {
         method: "POST",
@@ -864,7 +924,7 @@ export default function SousPage() {
         body: JSON.stringify({
           system: `You are a world-class chef with encyclopaedic knowledge of real, named recipes from cookbooks, food websites (BBC Good Food, Serious Eats, NYT Cooking, AllRecipes, Bon Appétit, etc.), and culinary traditions worldwide.
 
-Given a list of ingredients, suggest 3 REAL, SPECIFIC, NAMED recipes a home cook could actually make — dishes people would genuinely search for online. Prefer well-known classics or popular modern recipes over generic inventions. If the ingredients strongly suggest a particular cuisine or dish, lean into that.
+Given a list of ingredients, suggest 3 REAL, SPECIFIC, NAMED recipes a home cook could actually make — dishes people would genuinely search for online. Prefer well-known classics or popular modern recipes over generic inventions. If the ingredients strongly suggest a particular cuisine or dish, lean into that.${constraintBlock}
 
 Respond with ONLY a JSON array — no markdown, no explanation. Each recipe object must have exactly these fields:
 {
@@ -882,7 +942,7 @@ Steps must be detailed, practical, kitchen-tested instructions a home cook can f
           messages: [
             {
               role: "user",
-              content: `I have these ingredients available: ${ingredients.join(", ")}.
+              content: `I have these ingredients available: ${ingredients.join(", ")}.${constraintBlock ? `\n\nRemember to strictly follow my dietary and cuisine preferences stated in the system prompt.` : ""}
 
 Search your knowledge of real recipes from cookbooks and food websites. Give me 3 specific, named dishes I can actually make — ideally ones I could look up online to verify. Prioritise recipes that use most of my ingredients well.`,
             },
@@ -1312,15 +1372,30 @@ Search your knowledge of real recipes from cookbooks and food websites. Give me 
             >
               🖼️ Choose from library
             </button>
-            <button
-              style={styles.pantryBtn}
-              onClick={() => { setPantryDrawerOpen(true); loadPantryDrawer(); }}
-            >
-              🥫 Manage pantry
-              {pantryIngredients.length > 0 && (
-                <span style={styles.pantryCount}>{pantryIngredients.length}</span>
-              )}
-            </button>
+            <div style={styles.homeSecondaryRow}>
+              <button
+                style={styles.pantryBtn}
+                onClick={() => { setPantryDrawerOpen(true); loadPantryDrawer(); }}
+              >
+                🥫 Pantry
+                {pantryIngredients.length > 0 && (
+                  <span style={styles.pantryCount}>{pantryIngredients.length}</span>
+                )}
+              </button>
+              <button
+                style={styles.prefsBtn}
+                onClick={() => {
+                  setDraftDietary([...prefsDietary]);
+                  setDraftCuisines([...prefsCuisines]);
+                  setPrefsDrawerOpen(true);
+                }}
+              >
+                ⚙️ Preferences
+                {(prefsDietary.length + prefsCuisines.length) > 0 && (
+                  <span style={styles.pantryCount}>{prefsDietary.length + prefsCuisines.length}</span>
+                )}
+              </button>
+            </div>
           </div>
 
           <input
@@ -1392,6 +1467,98 @@ Search your knowledge of real recipes from cookbooks and food websites. Give me 
         </div>
 
         <p style={styles.footerNote}>Signed in as {user?.email}</p>
+
+        {/* Preferences drawer backdrop */}
+        {prefsDrawerOpen && (
+          <div
+            style={styles.drawerBackdrop}
+            onClick={() => setPrefsDrawerOpen(false)}
+          />
+        )}
+
+        {/* Preferences drawer */}
+        <div style={{
+          ...styles.drawer,
+          transform: prefsDrawerOpen ? "translateY(0)" : "translateY(100%)",
+          zIndex: 202,
+        }}>
+          <div style={styles.drawerHandle} />
+          <div style={styles.drawerHeader}>
+            <h3 style={styles.drawerTitle}>⚙️ Preferences</h3>
+            <button style={styles.drawerClose} onClick={() => setPrefsDrawerOpen(false)}>✕</button>
+          </div>
+          <p style={styles.drawerSub}>
+            Set dietary restrictions and cuisine preferences. These are applied to every recipe search.
+          </p>
+
+          <p style={styles.prefsSectionLabel}>Dietary restrictions</p>
+          <div style={styles.prefsChipGroup}>
+            {DIETARY_OPTIONS.map((opt) => {
+              const active = draftDietary.includes(opt);
+              return (
+                <button
+                  key={opt}
+                  style={{ ...styles.prefsChip, ...(active ? styles.prefsChipActive : {}) }}
+                  onClick={() =>
+                    setDraftDietary((prev) =>
+                      active ? prev.filter((x) => x !== opt) : [...prev, opt]
+                    )
+                  }
+                >
+                  {active ? "✓ " : ""}{opt}
+                </button>
+              );
+            })}
+          </div>
+
+          <p style={styles.prefsSectionLabel}>Cuisine preferences</p>
+          <div style={styles.prefsChipGroup}>
+            {CUISINE_OPTIONS.map((opt) => {
+              const active = draftCuisines.includes(opt);
+              return (
+                <button
+                  key={opt}
+                  style={{ ...styles.prefsChip, ...(active ? styles.prefsCuisineChipActive : {}) }}
+                  onClick={() =>
+                    setDraftCuisines((prev) =>
+                      active ? prev.filter((x) => x !== opt) : [...prev, opt]
+                    )
+                  }
+                >
+                  {active ? "✓ " : ""}{opt}
+                </button>
+              );
+            })}
+          </div>
+
+          <button
+            style={{
+              ...styles.primaryBtn,
+              marginTop: 8,
+              opacity: prefsSaving ? 0.6 : 1,
+            }}
+            disabled={prefsSaving}
+            onClick={async () => {
+              setPrefsSaving(true);
+              try {
+                await fetch("/api/preferences", {
+                  method: "POST",
+                  headers: { "Content-Type": "application/json" },
+                  body: JSON.stringify({ dietary: draftDietary, cuisines: draftCuisines }),
+                });
+                setPrefsDietary(draftDietary);
+                setPrefsCuisines(draftCuisines);
+                setPrefsDrawerOpen(false);
+              } catch {}
+              setPrefsSaving(false);
+            }}
+          >
+            {prefsSaving ? "Saving…" : "✓ Save preferences"}
+          </button>
+          <button style={styles.ghostBtn} onClick={() => setPrefsDrawerOpen(false)}>
+            Cancel
+          </button>
+        </div>
 
         {/* Pantry drawer backdrop */}
         {pantryDrawerOpen && (
@@ -1790,6 +1957,52 @@ Search your knowledge of real recipes from cookbooks and food websites. Give me 
         <div style={styles.recipesContent}>
           <h2 style={styles.sectionTitle}>What you can cook</h2>
           <p style={styles.sectionSub}>Tap a recipe to start cooking with voice guidance.</p>
+
+          {/* Active preference filter chips */}
+          {(prefsDietary.length > 0 || prefsCuisines.length > 0) && (
+            <div style={styles.activeFiltersRow}>
+              {prefsDietary.map((d) => (
+                <span key={d} style={styles.filterChipDietary}>
+                  {d}
+                  <button
+                    style={styles.filterChipDismiss}
+                    onClick={async () => {
+                      const next = prefsDietary.filter((x) => x !== d);
+                      setPrefsDietary(next);
+                      await fetch("/api/preferences", {
+                        method: "POST",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify({ dietary: next, cuisines: prefsCuisines }),
+                      });
+                    }}
+                    aria-label={`Remove ${d} filter`}
+                  >
+                    ✕
+                  </button>
+                </span>
+              ))}
+              {prefsCuisines.map((c) => (
+                <span key={c} style={styles.filterChipCuisine}>
+                  {c}
+                  <button
+                    style={styles.filterChipDismiss}
+                    onClick={async () => {
+                      const next = prefsCuisines.filter((x) => x !== c);
+                      setPrefsCuisines(next);
+                      await fetch("/api/preferences", {
+                        method: "POST",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify({ dietary: prefsDietary, cuisines: next }),
+                      });
+                    }}
+                    aria-label={`Remove ${c} filter`}
+                  >
+                    ✕
+                  </button>
+                </span>
+              ))}
+            </div>
+          )}
 
           {/* ── Order confirmation toast ── */}
           {orderToast && (
@@ -2547,6 +2760,113 @@ const styles: Record<string, React.CSSProperties> = {
     fontSize: 12,
   },
 
+  // Home secondary row (pantry + prefs side by side)
+  homeSecondaryRow: {
+    display: "flex",
+    gap: 10,
+    width: "100%",
+  },
+  prefsBtn: {
+    flex: 1,
+    background: "#1a1a2e",
+    color: "#a78bfa",
+    border: "1px solid #4c1d9544",
+    borderRadius: 16,
+    padding: "14px 16px",
+    fontSize: 15,
+    fontWeight: 600,
+    cursor: "pointer",
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 8,
+    transition: "opacity 0.2s",
+  },
+
+  // Preferences drawer
+  prefsSectionLabel: {
+    color: "#888",
+    fontSize: 12,
+    fontWeight: 700,
+    textTransform: "uppercase" as const,
+    letterSpacing: 0.6,
+    margin: "8px 0 6px",
+    flexShrink: 0,
+  },
+  prefsChipGroup: {
+    display: "flex",
+    flexWrap: "wrap" as const,
+    gap: 8,
+    marginBottom: 4,
+  },
+  prefsChip: {
+    background: "#1e1e1e",
+    color: "#aaa",
+    border: "1px solid #333",
+    borderRadius: 20,
+    padding: "8px 14px",
+    fontSize: 13,
+    fontWeight: 600,
+    cursor: "pointer",
+    transition: "all 0.15s",
+    whiteSpace: "nowrap" as const,
+  },
+  prefsChipActive: {
+    background: "#1f1208",
+    color: "#fb923c",
+    border: "1px solid #f59e0b88",
+  },
+  prefsCuisineChipActive: {
+    background: "#0f1a2e",
+    color: "#60a5fa",
+    border: "1px solid #3b82f688",
+  },
+
+  // Active filter chips on recipe screen
+  activeFiltersRow: {
+    display: "flex",
+    flexWrap: "wrap" as const,
+    gap: 8,
+    alignItems: "center",
+    padding: "2px 0 4px",
+  },
+  filterChipDietary: {
+    display: "inline-flex",
+    alignItems: "center",
+    gap: 6,
+    background: "#1f1208",
+    color: "#fb923c",
+    border: "1px solid #f59e0b66",
+    borderRadius: 20,
+    padding: "5px 10px 5px 12px",
+    fontSize: 12,
+    fontWeight: 700,
+  },
+  filterChipCuisine: {
+    display: "inline-flex",
+    alignItems: "center",
+    gap: 6,
+    background: "#0f1a2e",
+    color: "#60a5fa",
+    border: "1px solid #3b82f666",
+    borderRadius: 20,
+    padding: "5px 10px 5px 12px",
+    fontSize: 12,
+    fontWeight: 700,
+  },
+  filterChipDismiss: {
+    background: "transparent",
+    border: "none",
+    color: "inherit",
+    cursor: "pointer",
+    padding: "0 2px",
+    fontSize: 11,
+    lineHeight: 1,
+    opacity: 0.7,
+    display: "flex",
+    alignItems: "center",
+  },
+
   // Buttons
   primaryBtn: {
     background: "#FF6B35",
@@ -3242,15 +3562,15 @@ const styles: Record<string, React.CSSProperties> = {
 
   // Pantry button on home
   pantryBtn: {
+    flex: 1,
     background: "#1a2a1a",
     color: "#86efac",
     border: "1px solid #22c55e44",
     borderRadius: 16,
-    padding: "14px 24px",
+    padding: "14px 16px",
     fontSize: 15,
     fontWeight: 600,
     cursor: "pointer",
-    width: "100%",
     display: "flex",
     alignItems: "center",
     justifyContent: "center",
