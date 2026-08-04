@@ -9,6 +9,8 @@ type AppState =
   | "camera"
   | "preview"
   | "uploading"
+  | "analysing"
+  | "ingredients"
   | "done";
 
 interface User {
@@ -29,6 +31,10 @@ export default function SousPage() {
   const [capturedSource, setCapturedSource] = useState<"camera" | "library">("camera");
   const [cameraError, setCameraError] = useState("");
   const [uploadedUrl, setUploadedUrl] = useState<string | null>(null);
+  const [ingredients, setIngredients] = useState<string[]>([]);
+  const [newIngredient, setNewIngredient] = useState("");
+  const [editingIndex, setEditingIndex] = useState<number | null>(null);
+  const [editingValue, setEditingValue] = useState("");
 
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -165,7 +171,50 @@ export default function SousPage() {
       if (!saveRes.ok) throw new Error("Save failed");
 
       setUploadedUrl(url);
-      setAppState("done");
+
+      // Ask AI to identify ingredients in the photo
+      setAppState("analysing");
+      const aiRes = await fetch("/api/ai", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          system:
+            "You are a kitchen assistant. When shown a photo of food or ingredients, respond with ONLY a JSON array of ingredient name strings — no explanation, no markdown, just the raw JSON array. Example: [\"eggs\",\"butter\",\"flour\"]",
+          messages: [
+            {
+              role: "user",
+              content: [
+                {
+                  type: "text",
+                  text: "List every ingredient or food item you can see in this photo.",
+                },
+                {
+                  type: "image_url",
+                  image_url: { url },
+                },
+              ],
+            },
+          ],
+        }),
+      });
+      if (!aiRes.ok) throw new Error("AI analysis failed");
+      const { text } = await aiRes.json();
+
+      let detected: string[] = [];
+      try {
+        // Strip markdown code fences if the model wrapped the JSON
+        const cleaned = text.replace(/```[a-z]*\n?/gi, "").trim();
+        detected = JSON.parse(cleaned);
+        if (!Array.isArray(detected)) detected = [];
+      } catch {
+        // If parsing fails, try to extract quoted words as a fallback
+        detected = (text.match(/"([^"]+)"/g) || []).map((s: string) =>
+          s.replace(/"/g, "")
+        );
+      }
+
+      setIngredients(detected.filter((i) => typeof i === "string" && i.trim()));
+      setAppState("ingredients");
     } catch (err: unknown) {
       alert(err instanceof Error ? err.message : "Something went wrong. Please try again.");
       setAppState("preview");
@@ -178,8 +227,42 @@ export default function SousPage() {
     setCapturedBlob(null);
     setUploadedUrl(null);
     setCameraError("");
+    setIngredients([]);
+    setNewIngredient("");
+    setEditingIndex(null);
+    setEditingValue("");
     setAppState("home");
   }, [capturedImage]);
+
+  const removeIngredient = useCallback((index: number) => {
+    setIngredients((prev) => prev.filter((_, i) => i !== index));
+  }, []);
+
+  const startEditing = useCallback((index: number, value: string) => {
+    setEditingIndex(index);
+    setEditingValue(value);
+  }, []);
+
+  const commitEdit = useCallback(() => {
+    if (editingIndex === null) return;
+    const trimmed = editingValue.trim();
+    if (trimmed) {
+      setIngredients((prev) =>
+        prev.map((item, i) => (i === editingIndex ? trimmed : item))
+      );
+    } else {
+      setIngredients((prev) => prev.filter((_, i) => i !== editingIndex));
+    }
+    setEditingIndex(null);
+    setEditingValue("");
+  }, [editingIndex, editingValue]);
+
+  const addIngredient = useCallback(() => {
+    const trimmed = newIngredient.trim();
+    if (!trimmed) return;
+    setIngredients((prev) => [...prev, trimmed]);
+    setNewIngredient("");
+  }, [newIngredient]);
 
   // ── RENDER ─────────────────────────────────────────────────────────────
 
@@ -395,12 +478,118 @@ export default function SousPage() {
     );
   }
 
+  if (appState === "analysing") {
+    return (
+      <div style={styles.fullscreen}>
+        <div style={styles.spinner} />
+        <p style={{ color: "#fff", marginTop: 20, fontSize: 18 }}>Identifying ingredients…</p>
+        <p style={{ color: "#666", marginTop: 8, fontSize: 14 }}>AI is looking at your photo</p>
+      </div>
+    );
+  }
+
+  if (appState === "ingredients") {
+    return (
+      <div style={styles.fullscreen}>
+        <div style={styles.header}>
+          <button style={styles.ghostBtn} onClick={resetToHome}>← Start over</button>
+          <span style={{ color: "#fff", fontWeight: 600 }}>Ingredients</span>
+          <div style={{ width: 90 }} />
+        </div>
+
+        <div style={styles.ingredientsContent}>
+          {uploadedUrl && (
+            <img src={uploadedUrl} alt="Your ingredients" style={styles.thumbImage} />
+          )}
+
+          <h2 style={styles.sectionTitle}>
+            {ingredients.length > 0
+              ? `Found ${ingredients.length} ingredient${ingredients.length !== 1 ? "s" : ""}`
+              : "No ingredients detected"}
+          </h2>
+          <p style={styles.sectionSub}>
+            Tap any item to edit it, or swipe the ✕ to remove. Add anything the AI missed below.
+          </p>
+
+          <ul style={styles.ingredientList}>
+            {ingredients.map((item, i) => (
+              <li key={i} style={styles.ingredientItem}>
+                {editingIndex === i ? (
+                  <input
+                    style={styles.inlineInput}
+                    value={editingValue}
+                    autoFocus
+                    onChange={(e) => setEditingValue(e.target.value)}
+                    onBlur={commitEdit}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter") commitEdit();
+                      if (e.key === "Escape") {
+                        setEditingIndex(null);
+                        setEditingValue("");
+                      }
+                    }}
+                  />
+                ) : (
+                  <span
+                    style={styles.ingredientLabel}
+                    onClick={() => startEditing(i, item)}
+                  >
+                    {item}
+                  </span>
+                )}
+                <button
+                  style={styles.removeBtn}
+                  onClick={() => removeIngredient(i)}
+                  aria-label={`Remove ${item}`}
+                >
+                  ✕
+                </button>
+              </li>
+            ))}
+          </ul>
+
+          {/* Add missing ingredient */}
+          <div style={styles.addRow}>
+            <input
+              style={styles.addInput}
+              type="text"
+              placeholder="Add a missed ingredient…"
+              value={newIngredient}
+              onChange={(e) => setNewIngredient(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") addIngredient();
+              }}
+            />
+            <button
+              style={styles.addBtn}
+              onClick={addIngredient}
+              disabled={!newIngredient.trim()}
+            >
+              + Add
+            </button>
+          </div>
+
+          <button
+            style={{ ...styles.primaryBtn, marginTop: 8 }}
+            onClick={() => setAppState("done")}
+            disabled={ingredients.length === 0}
+          >
+            🍽️ Find recipes →
+          </button>
+          <button style={styles.ghostBtn} onClick={resetToHome}>
+            Start over
+          </button>
+        </div>
+      </div>
+    );
+  }
+
   if (appState === "done") {
     return (
       <div style={styles.fullscreen}>
         <div style={styles.doneCard}>
           <div style={{ fontSize: 72 }}>✅</div>
-          <h2 style={styles.doneTitle}>Photo saved!</h2>
+          <h2 style={styles.doneTitle}>Ready to cook!</h2>
           {uploadedUrl && (
             <img
               src={uploadedUrl}
@@ -408,8 +597,15 @@ export default function SousPage() {
               style={styles.doneImage}
             />
           )}
+          {ingredients.length > 0 && (
+            <div style={styles.ingredientsSummary}>
+              {ingredients.map((item, i) => (
+                <span key={i} style={styles.ingredientChip}>{item}</span>
+              ))}
+            </div>
+          )}
           <p style={styles.doneSub}>
-            Next: Sous will analyse your ingredients and suggest recipes.
+            Recipe suggestions coming next!
           </p>
           <button style={styles.primaryBtn} onClick={resetToHome}>
             📷 Take another photo
@@ -690,6 +886,107 @@ const styles: Record<string, React.CSSProperties> = {
     animation: "spin 0.8s linear infinite",
   },
 
+  // Ingredients screen
+  ingredientsContent: {
+    display: "flex",
+    flexDirection: "column",
+    alignItems: "stretch",
+    padding: "80px 20px 32px",
+    width: "100%",
+    maxWidth: 500,
+    gap: 12,
+    overflowY: "auto" as const,
+    maxHeight: "100dvh",
+  },
+  thumbImage: {
+    width: "100%",
+    maxHeight: 180,
+    objectFit: "cover",
+    borderRadius: 16,
+    border: "1px solid #333",
+  },
+  sectionTitle: {
+    color: "#fff",
+    fontSize: 22,
+    fontWeight: 800,
+    margin: "4px 0 0",
+  },
+  sectionSub: {
+    color: "#666",
+    fontSize: 13,
+    margin: 0,
+    lineHeight: 1.5,
+  },
+  ingredientList: {
+    listStyle: "none",
+    margin: 0,
+    padding: 0,
+    display: "flex",
+    flexDirection: "column" as const,
+    gap: 8,
+  },
+  ingredientItem: {
+    display: "flex",
+    alignItems: "center",
+    background: "#1e1e1e",
+    borderRadius: 12,
+    padding: "10px 12px",
+    gap: 8,
+  },
+  ingredientLabel: {
+    flex: 1,
+    color: "#fff",
+    fontSize: 16,
+    cursor: "pointer",
+    padding: "2px 0",
+  },
+  inlineInput: {
+    flex: 1,
+    background: "transparent",
+    border: "none",
+    borderBottom: "1px solid #FF6B35",
+    color: "#fff",
+    fontSize: 16,
+    outline: "none",
+    padding: "2px 4px",
+  },
+  removeBtn: {
+    background: "transparent",
+    border: "none",
+    color: "#555",
+    fontSize: 16,
+    cursor: "pointer",
+    padding: "4px 6px",
+    lineHeight: 1,
+    flexShrink: 0,
+  },
+  addRow: {
+    display: "flex",
+    gap: 8,
+    marginTop: 4,
+  },
+  addInput: {
+    flex: 1,
+    padding: "12px 14px",
+    borderRadius: 12,
+    border: "1px solid #333",
+    background: "#1e1e1e",
+    color: "#fff",
+    fontSize: 15,
+    outline: "none",
+  },
+  addBtn: {
+    background: "#FF6B35",
+    color: "#fff",
+    border: "none",
+    borderRadius: 12,
+    padding: "12px 16px",
+    fontSize: 15,
+    fontWeight: 700,
+    cursor: "pointer",
+    whiteSpace: "nowrap" as const,
+  },
+
   // Done
   doneCard: {
     display: "flex",
@@ -703,10 +1000,24 @@ const styles: Record<string, React.CSSProperties> = {
   doneTitle: { color: "#fff", fontSize: 28, fontWeight: 800, margin: 0 },
   doneImage: {
     width: "100%",
-    maxHeight: 300,
+    maxHeight: 200,
     objectFit: "cover",
     borderRadius: 20,
     border: "2px solid #333",
+  },
+  ingredientsSummary: {
+    display: "flex",
+    flexWrap: "wrap" as const,
+    gap: 8,
+    justifyContent: "center",
+  },
+  ingredientChip: {
+    background: "#1e1e1e",
+    color: "#ccc",
+    border: "1px solid #333",
+    borderRadius: 20,
+    padding: "5px 12px",
+    fontSize: 13,
   },
   doneSub: {
     color: "#888",
