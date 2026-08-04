@@ -852,7 +852,7 @@ Steps should be clear, concise, kitchen-friendly instructions. Aim for 5-10 step
               <div style={styles.recipeMeta}>
                 <span>⏱ {recipe.total_time_minutes} min</span>
                 <span>📋 {recipe.steps.length} steps</span>
-                {recipe.extra_ingredients_needed?.length > 0 && (
+                {(recipe.extra_ingredients_needed?.length ?? 0) > 0 && (
                   <span style={{ color: "#FF6B6B" }}>
                     +{recipe.extra_ingredients_needed.length} extra needed
                   </span>
