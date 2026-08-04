@@ -62,6 +62,10 @@ export default function SousPage() {
   const [capturedSource, setCapturedSource] = useState<"camera" | "library">("camera");
   const [cameraError, setCameraError] = useState("");
   const [uploadedUrl, setUploadedUrl] = useState<string | null>(null);
+  const [uploadedUrls, setUploadedUrls] = useState<string[]>([]);
+  const [photoCount, setPhotoCount] = useState(0);
+  const [addingPhoto, setAddingPhoto] = useState(false);
+  const [addPhotoError, setAddPhotoError] = useState("");
   const [ingredients, setIngredients] = useState<string[]>([]);
   const [confidenceMap, setConfidenceMap] = useState<Record<string, "high" | "medium" | "low">>({});
   const [pantryIngredients, setPantryIngredients] = useState<string[]>([]);
@@ -101,6 +105,8 @@ export default function SousPage() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const addPhotoFileInputRef = useRef<HTMLInputElement>(null);
+  const addPhotoCameraInputRef = useRef<HTMLInputElement>(null);
   const recognitionRef = useRef<any>(null);
   const stepTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const [stepTimerTotal, setStepTimerTotal] = useState(0);
@@ -487,6 +493,8 @@ export default function SousPage() {
       if (!saveRes.ok) throw new Error("Save failed");
 
       setUploadedUrl(url);
+      setUploadedUrls([url]);
+      setPhotoCount(1);
 
       // Ask AI to identify ingredients in the photo
       setAppState("analysing");
@@ -556,6 +564,7 @@ export default function SousPage() {
       const finalList = merged.length > 0 ? merged : detectedNames;
       setConfidenceMap(newConfidenceMap);
       setIngredients(finalList);
+      setAddPhotoError("");
       // Auto-open inline edit for low-confidence items so they're immediately obvious
       const firstLowIdx = finalList.findIndex(
         (name) => newConfidenceMap[name.toLowerCase()] === "low"
@@ -952,11 +961,146 @@ Search your knowledge of real recipes from cookbooks and food websites. Give me 
     } catch {}
   }, [pantryItems]);
 
+  // ── Merge a new batch of detected ingredients into the existing list ────────
+  const mergeIngredients = useCallback(
+    (
+      existing: string[],
+      existingConf: Record<string, "high" | "medium" | "low">,
+      newItems: { name: string; confidence: "high" | "medium" | "low" }[],
+      pantry: string[]
+    ): { ingredients: string[]; confidenceMap: Record<string, "high" | "medium" | "low"> } => {
+      const confRank: Record<"high" | "medium" | "low", number> = { high: 3, medium: 2, low: 1 };
+      const merged: Record<string, "high" | "medium" | "low"> = { ...existingConf };
+      const nameMap: Record<string, string> = {};
+
+      // Seed nameMap from existing list so we preserve original casing
+      existing.forEach((name) => { nameMap[name.toLowerCase()] = name; });
+
+      newItems.forEach(({ name, confidence }) => {
+        const key = name.trim().toLowerCase();
+        if (!key) return;
+        if (!nameMap[key]) nameMap[key] = name.trim();
+        const curr = merged[key];
+        if (!curr || confRank[confidence] > confRank[curr]) {
+          merged[key] = confidence;
+        }
+      });
+
+      // Pantry items always high
+      pantry.forEach((p) => { merged[p.toLowerCase()] = "high"; });
+
+      // Reconstruct ordered list: existing first, then new additions
+      const existingKeys = new Set(existing.map((n) => n.toLowerCase()));
+      const additions = Object.keys(nameMap).filter((k) => !existingKeys.has(k));
+      const finalNames = [
+        ...existing,
+        ...additions.map((k) => nameMap[k]),
+      ];
+
+      // Build final confidenceMap keyed by original display name (lowercase key → display name)
+      const finalConf: Record<string, "high" | "medium" | "low"> = {};
+      finalNames.forEach((name) => {
+        finalConf[name.toLowerCase()] = merged[name.toLowerCase()] ?? "medium";
+      });
+
+      return { ingredients: finalNames, confidenceMap: finalConf };
+    },
+    []
+  );
+
+  // ── Handle an additional photo being chosen/captured on the ingredients screen ──
+  const handleAddPhoto = useCallback(
+    async (file: File) => {
+      if (!user) return;
+      setAddingPhoto(true);
+      setAddPhotoError("");
+      try {
+        // Upload
+        const formData = new FormData();
+        formData.append("file", file, "sous-extra.jpg");
+        const uploadRes = await fetch("/api/upload", { method: "POST", body: formData });
+        if (!uploadRes.ok) throw new Error("Upload failed");
+        const { url } = await uploadRes.json();
+
+        setUploadedUrls((prev) => [...prev, url]);
+        setPhotoCount((prev) => prev + 1);
+
+        // AI analysis
+        const aiRes = await fetch("/api/ai", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            system:
+              "You are a kitchen assistant. When shown a photo of food or ingredients, respond with ONLY a JSON array of objects — no explanation, no markdown, just the raw JSON array. Each object must have exactly two fields: \"name\" (string) and \"confidence\" (\"high\", \"medium\", or \"low\"). Use \"high\" when you can clearly identify the item, \"medium\" when reasonably sure, and \"low\" when guessing or partially obscured.",
+            messages: [
+              {
+                role: "user",
+                content: [
+                  { type: "text", text: "List every ingredient or food item you can see in this photo, with a confidence score for each." },
+                  { type: "image_url", image_url: { url } },
+                ],
+              },
+            ],
+          }),
+        });
+        if (!aiRes.ok) throw new Error("AI analysis failed");
+        const { text } = await aiRes.json();
+
+        let newItems: { name: string; confidence: "high" | "medium" | "low" }[] = [];
+        try {
+          const cleaned = text.replace(/```[a-z]*\n?/gi, "").trim();
+          const parsed = JSON.parse(cleaned);
+          if (Array.isArray(parsed)) {
+            newItems = parsed.map((item: unknown) => {
+              if (typeof item === "string") return { name: item, confidence: "medium" as const };
+              if (item && typeof (item as any).name === "string") {
+                const c = (item as any).confidence;
+                return {
+                  name: (item as any).name,
+                  confidence: (c === "high" || c === "medium" || c === "low") ? c : "medium" as const,
+                };
+              }
+              return null;
+            }).filter((x): x is { name: string; confidence: "high" | "medium" | "low" } => x !== null);
+          }
+        } catch {
+          const names = (text.match(/"([^"]+)"/g) || []).map((s: string) => s.replace(/"/g, ""));
+          newItems = names.map((n: string) => ({ name: n, confidence: "medium" as const }));
+        }
+
+        // Merge into existing state
+        setIngredients((prevIngredients) => {
+          setConfidenceMap((prevConf) => {
+            const { ingredients: merged, confidenceMap: mergedConf } = mergeIngredients(
+              prevIngredients,
+              prevConf,
+              newItems,
+              pantryIngredients
+            );
+            // We need to update ingredients from within this setter — use a timeout trick
+            // so we can call setIngredients outside. Instead, capture and schedule.
+            setTimeout(() => setIngredients(merged), 0);
+            return mergedConf;
+          });
+          return prevIngredients; // temporary; setTimeout above replaces it
+        });
+      } catch (err: unknown) {
+        setAddPhotoError(err instanceof Error ? err.message : "Could not analyse photo. Please try again.");
+      } finally {
+        setAddingPhoto(false);
+      }
+    },
+    [user, mergeIngredients, pantryIngredients]
+  );
+
   const resetToHome = useCallback(() => {
     if (capturedImage) URL.revokeObjectURL(capturedImage);
     setCapturedImage(null);
     setCapturedBlob(null);
     setUploadedUrl(null);
+    setUploadedUrls([]);
+    setPhotoCount(0);
+    setAddPhotoError("");
     setCameraError("");
     setIngredients([]);
     setNewIngredient("");
@@ -1427,9 +1571,74 @@ Search your knowledge of real recipes from cookbooks and food websites. Give me 
           <div style={{ width: 90 }} />
         </div>
 
+        {/* Hidden file inputs for adding more photos */}
+        <input
+          ref={addPhotoFileInputRef}
+          type="file"
+          accept="image/*"
+          style={{ display: "none" }}
+          onChange={(e) => {
+            const file = e.target.files?.[0];
+            if (file) handleAddPhoto(file);
+            e.target.value = "";
+          }}
+        />
+        <input
+          ref={addPhotoCameraInputRef}
+          type="file"
+          accept="image/*"
+          capture="environment"
+          style={{ display: "none" }}
+          onChange={(e) => {
+            const file = e.target.files?.[0];
+            if (file) handleAddPhoto(file);
+            e.target.value = "";
+          }}
+        />
+
         <div style={styles.ingredientsContent}>
-          {uploadedUrl && (
-            <img src={uploadedUrl} alt="Your ingredients" style={styles.thumbImage} />
+          {/* Photo strip */}
+          {uploadedUrls.length > 0 && (
+            <div style={styles.photoStrip}>
+              {uploadedUrls.map((u, idx) => (
+                <img
+                  key={idx}
+                  src={u}
+                  alt={`Photo ${idx + 1}`}
+                  style={styles.photoThumb}
+                />
+              ))}
+              <button
+                style={styles.addPhotoBtn}
+                onClick={() => addPhotoFileInputRef.current?.click()}
+                disabled={addingPhoto}
+                title="Add another photo"
+              >
+                {addingPhoto ? (
+                  <span style={styles.addPhotoBtnSpinner} />
+                ) : (
+                  <span style={styles.addPhotoBtnPlus}>＋</span>
+                )}
+              </button>
+            </div>
+          )}
+
+          {/* Photo count badge */}
+          {photoCount > 1 && (
+            <div style={styles.photoCountBadge}>
+              📷 {photoCount} photos analysed
+            </div>
+          )}
+
+          {addingPhoto && (
+            <div style={styles.addPhotoStatus}>
+              <div style={styles.spinnerSmall} />
+              <span>Analysing new photo…</span>
+            </div>
+          )}
+
+          {addPhotoError && (
+            <p style={{ ...styles.error, margin: 0 }}>{addPhotoError}</p>
           )}
 
           <h2 style={styles.sectionTitle}>
@@ -1547,7 +1756,7 @@ Search your knowledge of real recipes from cookbooks and food websites. Give me 
           <button
             style={{ ...styles.primaryBtn, marginTop: 8 }}
             onClick={findRecipes}
-            disabled={ingredients.length === 0}
+            disabled={ingredients.length === 0 || addingPhoto}
           >
             🍽️ Find recipes →
           </button>
@@ -2954,6 +3163,81 @@ const styles: Record<string, React.CSSProperties> = {
     fontWeight: 600,
     cursor: "pointer",
     whiteSpace: "nowrap" as const,
+  },
+
+  // Photo strip on ingredients screen
+  photoStrip: {
+    display: "flex",
+    flexDirection: "row" as const,
+    gap: 8,
+    overflowX: "auto" as const,
+    paddingBottom: 4,
+    alignItems: "center",
+    width: "100%",
+  },
+  photoThumb: {
+    width: 72,
+    height: 72,
+    objectFit: "cover" as const,
+    borderRadius: 12,
+    border: "1px solid #333",
+    flexShrink: 0,
+  },
+  addPhotoBtn: {
+    width: 72,
+    height: 72,
+    borderRadius: 12,
+    border: "2px dashed #444",
+    background: "#1a1a1a",
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+    cursor: "pointer",
+    flexShrink: 0,
+    transition: "border-color 0.2s",
+  },
+  addPhotoBtnPlus: {
+    color: "#FF6B35",
+    fontSize: 28,
+    fontWeight: 300,
+    lineHeight: 1,
+  },
+  addPhotoBtnSpinner: {
+    display: "inline-block",
+    width: 22,
+    height: 22,
+    border: "3px solid #333",
+    borderTop: "3px solid #FF6B35",
+    borderRadius: "50%",
+    animation: "spin 0.8s linear infinite",
+  },
+  photoCountBadge: {
+    display: "inline-flex",
+    alignSelf: "flex-start",
+    background: "#1a1228",
+    color: "#c4b5fd",
+    border: "1px solid #7c3aed44",
+    borderRadius: 20,
+    padding: "4px 12px",
+    fontSize: 12,
+    fontWeight: 700,
+    letterSpacing: 0.2,
+  },
+  addPhotoStatus: {
+    display: "flex",
+    alignItems: "center",
+    gap: 10,
+    color: "#888",
+    fontSize: 13,
+  },
+  spinnerSmall: {
+    width: 16,
+    height: 16,
+    border: "2px solid #333",
+    borderTop: "2px solid #FF6B35",
+    borderRadius: "50%",
+    animation: "spin 0.8s linear infinite",
+    flexShrink: 0,
   },
 
   // Pantry button on home
