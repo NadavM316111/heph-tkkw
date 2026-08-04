@@ -33,7 +33,7 @@ export default function RecipePage({ params }: { params: { id: string } }) {
   const [watchActive, setWatchActive] = useState(false);
   const recognitionRef = useRef<any>(null);
 
-  const { session, videoRef, startSession, stopSession, setWatchStep, triggerManualCheck } =
+  const { session, videoRef, startSession, stopSession, setWatchStep } =
     useWatchMeCook();
 
   // Fetch recipe
