@@ -1210,8 +1210,7 @@ Search your knowledge of real recipes from cookbooks and food websites. Give me 
         // Migrate confidence from old name to new name
         setConfidenceMap((cm) => {
           const next = { ...cm };
-          const oldConf = next[oldName?.toLowerCase() ?? ""] ?? "medium";
-          if (oldName) delete next[oldName.toLowerCase()];
+            if (oldName) delete next[oldName.toLowerCase()];
           // Edited items become "high" confidence — user confirmed them
           next[trimmed.toLowerCase()] = "high";
           return next;
